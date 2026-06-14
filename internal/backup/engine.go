@@ -18,28 +18,13 @@ func createArchiveFromDir(srcDir, dstPath string) (sha string, err error) {
 	if err != nil {
 		return "", fmt.Errorf("create archive: %w", err)
 	}
-	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-	}()
+	defer f.Close()
 
 	h := sha256.New()
 	// gzip writes compressed bytes to both the file and the hash, so the digest
 	// is over the on-disk .tar.gz.
 	gz := gzip.NewWriter(io.MultiWriter(f, h))
-	defer func() {
-		if cerr := gz.Close(); err == nil {
-			err = cerr
-		}
-	}()
-
 	tw := tar.NewWriter(gz)
-	defer func() {
-		if cerr := tw.Close(); err == nil {
-			err = cerr
-		}
-	}()
 
 	err = filepath.Walk(srcDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
@@ -55,7 +40,10 @@ func createArchiveFromDir(srcDir, dstPath string) (sha string, err error) {
 		}
 
 		// Skip backup files themselves if they are stored in the server directory
-		if strings.Contains(rel, "backups/") || strings.Contains(rel, "backups\\") {
+		if rel == "backups" || strings.HasPrefix(rel, "backups/") || strings.HasPrefix(rel, "backups\\") {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
@@ -88,6 +76,14 @@ func createArchiveFromDir(srcDir, dstPath string) (sha string, err error) {
 
 	if err != nil {
 		return "", fmt.Errorf("walk dir: %w", err)
+	}
+
+	// Close writers to ensure everything is flushed to the hash
+	if err := tw.Close(); err != nil {
+		return "", fmt.Errorf("close tar: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		return "", fmt.Errorf("close gzip: %w", err)
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil

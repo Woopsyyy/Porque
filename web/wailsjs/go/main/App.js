@@ -102,10 +102,6 @@ export function ListTunnels() {
   return window['go']['main']['App']['ListTunnels']();
 }
 
-export function OnBeforeClose(arg1) {
-  return window['go']['main']['App']['OnBeforeClose'](arg1);
-}
-
 export function Quit() {
   return window['go']['main']['App']['Quit']();
 }

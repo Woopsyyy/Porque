@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	_ "embed"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -24,8 +25,12 @@ import (
 	"github.com/woopsy/porque/internal/db"
 	"github.com/woopsy/porque/internal/mcserver"
 	"github.com/woopsy/porque/internal/playit"
+	"github.com/woopsy/porque/internal/systray"
 	"github.com/woopsy/porque/internal/worker"
 )
+
+//go:embed assets/mascot.png
+var mascotBytes []byte
 
 type App struct {
 	ctx     context.Context
@@ -107,6 +112,9 @@ func (a *App) startup(ctx context.Context) {
 	}
 	a.worker = worker.New(a.store, a.life, a.backups, pub, wConfig)
 	go a.worker.Run(context.Background())
+
+	// Start Windows system tray icon
+	systray.Start(mascotBytes, a.Show, a.Quit)
 }
 
 func (a *App) GetSystemInfo() map[string]any {

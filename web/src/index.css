@@ -1,0 +1,104 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg: 11 14 20; /* #0B0E14 */
+    --surface: 18 22 31; /* #12161F */
+    --surface-2: 22 27 37; /* #161B25 */
+    --border: 35 42 56; /* #232A38 */
+    --ink: 230 233 239; /* #E6E9EF */
+    --muted: 142 150 170; /* #8E96AA */
+    --faint: 92 100 119;
+    --gold: 232 185 49; /* #E8B931 crown */
+    --gold-bright: 245 213 110;
+    --gold-deep: 176 128 24;
+    --running: 52 211 153; /* emerald */
+    --warn: 251 191 36; /* amber */
+    --danger: 248 113 113; /* red */
+    --idle: 110 122 142; /* slate */
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scrollbar-color: rgb(var(--border)) transparent;
+  }
+
+  body {
+    @apply bg-bg text-ink font-sans antialiased;
+    min-height: 100vh;
+  }
+
+  /* Atmosphere: a fixed layer with a gold corner glow + faint engineering grid. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(900px 500px at 12% -8%, rgb(var(--gold) / 0.1), transparent 60%),
+      radial-gradient(1100px 700px at 100% 0%, rgb(60 90 160 / 0.08), transparent 55%),
+      linear-gradient(rgb(var(--border) / 0.22) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(var(--border) / 0.22) 1px, transparent 1px);
+    background-size: 100% 100%, 100% 100%, 46px 46px, 46px 46px;
+    background-position: 0 0, 0 0, -1px -1px, -1px -1px;
+    mask-image: radial-gradient(150% 130% at 50% 0%, #000 38%, transparent 100%);
+  }
+
+  ::selection {
+    background: rgb(var(--gold) / 0.32);
+    color: rgb(var(--ink));
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(var(--border));
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--faint));
+    background-clip: content-box;
+  }
+}
+
+@layer components {
+  /* Glassy panel used across cards and the app chrome. */
+  .panel {
+    @apply rounded-lg border border-border bg-surface/70 shadow-panel backdrop-blur-sm;
+  }
+
+  /* Uppercase micro-label used for section headers and metadata. */
+  .eyebrow {
+    @apply font-mono text-[0.68rem] uppercase tracking-[0.18em] text-faint;
+  }
+
+  /* Gold focus ring for interactive elements. */
+  .ring-gold {
+    @apply outline-none ring-2 ring-gold/60 ring-offset-2 ring-offset-bg;
+  }
+}
+
+/* Console: a real terminal feel with a faint scanline texture. */
+.console-scroll {
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 22px,
+      rgb(255 255 255 / 0.012) 22px,
+      rgb(255 255 255 / 0.012) 23px
+    );
+}

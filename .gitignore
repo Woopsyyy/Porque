@@ -1,0 +1,43 @@
+# env / secrets
+.env
+*.local
+
+# wails build output
+/build/bin/
+
+# frontend build output
+/web/dist/
+/web/.vite/
+
+# node dependencies
+node_modules/
+/web/node_modules/
+
+# local database/runtime servers/backups
+/servers/
+/tmp/
+
+# go compilation/binary artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/dist/
+
+# playwright / local test artifacts
+.playwright-mcp/
+*.png
+!assets/*.png
+!web/public/*.png
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

@@ -102,6 +102,14 @@ export function ListTunnels() {
   return window['go']['main']['App']['ListTunnels']();
 }
 
+export function OnBeforeClose(arg1) {
+  return window['go']['main']['App']['OnBeforeClose'](arg1);
+}
+
+export function Quit() {
+  return window['go']['main']['App']['Quit']();
+}
+
 export function RescanTunnel(arg1) {
   return window['go']['main']['App']['RescanTunnel'](arg1);
 }
@@ -120,6 +128,10 @@ export function SelectFile() {
 
 export function SelectFolder() {
   return window['go']['main']['App']['SelectFolder']();
+}
+
+export function Show() {
+  return window['go']['main']['App']['Show']();
 }
 
 export function StartPlayitClaim() {
@@ -158,8 +170,8 @@ export function UpdateServerSettings(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['main']['App']['UpdateServerSettings'](arg1, arg2, arg3, arg4, arg5);
 }
 
-export function UpdateSettings(arg1, arg2) {
-  return window['go']['main']['App']['UpdateSettings'](arg1, arg2);
+export function UpdateSettings(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['UpdateSettings'](arg1, arg2, arg3, arg4);
 }
 
 export function UploadServerIcon(arg1, arg2) {

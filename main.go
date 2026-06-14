@@ -3,24 +3,50 @@ package main
 import (
 	"embed"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/menu"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/systray"
 )
 
 //go:embed all:web/dist
 var assets embed.FS
 
+//go:embed assets/mascot.png
+var mascotBytes []byte
+
 func main() {
 	app := NewApp()
 
+	// Detect --minimized launch argument
+	startHidden := false
+	for _, arg := range os.Args {
+		if arg == "--minimized" {
+			startHidden = true
+			break
+		}
+	}
+
+	// Build the system tray context menu
+	trayMenu := menu.NewMenu()
+	trayMenu.AddText("Show Dashboard", nil, func(clickedData *menu.CallbackData) {
+		app.Show()
+	})
+	trayMenu.AddSeparator()
+	trayMenu.AddText("Quit", nil, func(clickedData *menu.CallbackData) {
+		app.Quit()
+	})
+
 	err := wails.Run(&options.App{
-		Title:  "Porque Minecraft Server Manager",
-		Width:  1024,
-		Height: 768,
+		Title:         "Porque Minecraft Server Manager",
+		Width:         1024,
+		Height:        768,
+		StartHidden:   startHidden,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,8 +70,16 @@ func main() {
 		},
 		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 59, A: 1},
 		OnStartup:        app.startup,
+		OnBeforeClose:    app.OnBeforeClose,
 		Bind: []interface{}{
 			app,
+		},
+		Systray: &systray.Options{
+			Title:       "Porque",
+			Tooltip:     "Porque Minecraft Server Manager",
+			Icon:        mascotBytes,
+			Menu:        trayMenu,
+			OnLeftClick: app.Show,
 		},
 	})
 

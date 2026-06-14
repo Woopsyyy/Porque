@@ -23,7 +23,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const running = servers?.filter((s) => s.state === "running").length ?? 0;
 
   return (
-    <div className="flex min-h-screen">
+    <div className="flex h-screen w-screen overflow-hidden select-none">
       {/* Sidebar */}
       <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-border bg-surface/40 backdrop-blur-sm md:flex">
         <div className="flex h-16 items-center border-b border-border px-5">
@@ -74,8 +74,8 @@ export function AppShell({ children }: { children: ReactNode }) {
       </aside>
 
       {/* Main column */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-30 flex h-16 items-center justify-between border-b border-border bg-bg/80 px-6 backdrop-blur-md">
+      <div className="flex min-w-0 flex-1 flex-col h-full overflow-hidden">
+        <header className="sticky top-0 z-30 flex h-16 shrink-0 items-center justify-between border-b border-border bg-bg/80 px-6 backdrop-blur-md">
           <div className="flex items-center gap-3 md:hidden">
             <Logo size={28} />
           </div>
@@ -98,7 +98,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </header>
 
-        <main className="flex-1 px-6 py-7">
+        <main className="flex-1 overflow-y-auto px-6 py-7">
           <div className="mx-auto w-full max-w-6xl animate-fade-up">{children}</div>
         </main>
       </div>

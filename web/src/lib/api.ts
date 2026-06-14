@@ -207,9 +207,25 @@ export const api = {
   startPlayitClaim: () => call<{ claim_url: string }>(App.StartPlayitClaim),
 
   getSettings: () =>
-    call<{ servers_path: string; backups_within_server: string }>(App.GetSettings),
-  updateSettings: (body: { servers_path?: string; backups_within_server?: string }) =>
-    call<void>(App.UpdateSettings, body.servers_path || "", body.backups_within_server || ""),
+    call<{
+      servers_path: string;
+      backups_within_server: string;
+      run_on_boot: string;
+      close_to_minimize: string;
+    }>(App.GetSettings),
+  updateSettings: (body: {
+    servers_path?: string;
+    backups_within_server?: string;
+    run_on_boot?: string;
+    close_to_minimize?: string;
+  }) =>
+    call<void>(
+      App.UpdateSettings,
+      body.servers_path || "",
+      body.backups_within_server || "",
+      body.run_on_boot || "",
+      body.close_to_minimize || "",
+    ),
   importServer: (body: {
     name: string;
     type: ServerType;

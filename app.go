@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"github.com/woopsy/porque/internal/autostart"
 	"github.com/woopsy/porque/internal/backup"
 	"github.com/woopsy/porque/internal/db"
 	"github.com/woopsy/porque/internal/mcserver"
@@ -36,6 +37,8 @@ type App struct {
 
 	activeStreams   map[string]context.CancelFunc
 	activeStreamsMu sync.Mutex
+
+	allowClose bool
 }
 
 func NewApp() *App {
@@ -358,17 +361,73 @@ func (a *App) UpdateBackupSchedule(serverID string, enabled bool, intervalMinute
 func (a *App) GetSettings() (map[string]string, error) {
 	serversPath, _ := a.store.GetSetting(a.ctx, "servers_path")
 	backupsWithin, _ := a.store.GetSetting(a.ctx, "backups_within_server")
+	runOnBoot, _ := a.store.GetSetting(a.ctx, "run_on_boot")
+	closeToMin, _ := a.store.GetSetting(a.ctx, "close_to_minimize")
+
+	if runOnBoot == "" {
+		runOnBoot = "false"
+	}
+	if closeToMin == "" {
+		closeToMin = "false"
+	}
+
 	return map[string]string{
 		"servers_path":          serversPath,
 		"backups_within_server": backupsWithin,
+		"run_on_boot":           runOnBoot,
+		"close_to_minimize":     closeToMin,
 	}, nil
 }
 
-func (a *App) UpdateSettings(serversPath string, backupsWithinServer string) error {
+func (a *App) UpdateSettings(serversPath string, backupsWithinServer string, runOnBoot string, closeToMinimize string) error {
 	if err := a.store.SetSetting(a.ctx, "servers_path", serversPath); err != nil {
 		return err
 	}
-	return a.store.SetSetting(a.ctx, "backups_within_server", backupsWithinServer)
+	if err := a.store.SetSetting(a.ctx, "backups_within_server", backupsWithinServer); err != nil {
+		return err
+	}
+	if err := a.store.SetSetting(a.ctx, "run_on_boot", runOnBoot); err != nil {
+		return err
+	}
+	if err := a.store.SetSetting(a.ctx, "close_to_minimize", closeToMinimize); err != nil {
+		return err
+	}
+
+	// Update Windows autostart configuration
+	bootEnabled := runOnBoot == "true"
+	if err := autostart.Set(bootEnabled); err != nil {
+		wailsRuntime.LogErrorf(a.ctx, "failed to configure autostart: %v", err)
+	}
+
+	return nil
+}
+
+// OnBeforeClose intercepts the window close event. If close_to_minimize is enabled, it hides the window instead.
+func (a *App) OnBeforeClose(ctx context.Context) bool {
+	if a.allowClose {
+		return false // Allow the app to quit
+	}
+	closeToMin, _ := a.store.GetSetting(a.ctx, "close_to_minimize")
+	if closeToMin == "true" {
+		wailsRuntime.WindowHide(ctx)
+		return true // Prevent closing, hide window instead
+	}
+	return false // Allow standard exit
+}
+
+// Show makes the Wails window visible. Called from the system tray.
+func (a *App) Show() {
+	if a.ctx != nil {
+		wailsRuntime.WindowShow(a.ctx)
+	}
+}
+
+// Quit initiates a full application shutdown.
+func (a *App) Quit() {
+	a.allowClose = true
+	if a.ctx != nil {
+		wailsRuntime.Quit(a.ctx)
+	}
 }
 
 func (a *App) ListMods(serverID string) (map[string]any, error) {

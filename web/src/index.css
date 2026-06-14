@@ -24,13 +24,18 @@
     @apply border-border;
   }
 
-  html {
+  html, body {
     scrollbar-color: rgb(var(--border)) transparent;
+    overscroll-behavior: none;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
   }
 
   body {
     @apply bg-bg text-ink font-sans antialiased;
-    min-height: 100vh;
+    margin: 0;
+    padding: 0;
   }
 
   /* Atmosphere: a fixed layer with a gold corner glow + faint engineering grid. */

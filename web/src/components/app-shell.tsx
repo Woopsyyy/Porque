@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Boxes, Cable, Settings } from "lucide-react";
+import { Boxes, Cable, Settings, LogOut } from "lucide-react";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Logo } from "@/components/logo";
@@ -62,8 +62,17 @@ export function AppShell({ children }: { children: ReactNode }) {
           ))}
         </nav>
 
-        <div className="border-t border-border p-4">
-          <div className="flex items-center justify-between font-mono text-[0.7rem] text-faint">
+        <div className="border-t border-border p-3 flex flex-col gap-2">
+          <button
+            onClick={() => api.quitApp()}
+            className="flex items-center gap-2.5 rounded-md px-3 py-2 text-xs font-medium text-muted hover:bg-danger/10 hover:text-danger transition-colors text-left w-full"
+            title="Quit the application completely"
+          >
+            <LogOut className="h-3.5 w-3.5 text-faint" />
+            Quit Application
+          </button>
+          
+          <div className="flex items-center justify-between font-mono text-[0.68rem] text-faint px-3 pt-1 border-t border-border/20">
             <span>{total} servers</span>
             <span className="inline-flex items-center gap-1.5">
               <span className="h-1.5 w-1.5 animate-pulsedot rounded-full bg-running" />

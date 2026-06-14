@@ -244,5 +244,6 @@ export const api = {
       body.memory_mb || 2048,
       body.host_path,
     ),
+  quitApp: () => call<void>(App.Quit),
   selectFolder: () => call<string>(App.SelectFolder),
 };

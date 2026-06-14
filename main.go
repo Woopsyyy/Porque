@@ -8,17 +8,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wailsapp/wails/v2"
-	"github.com/wailsapp/wails/v2/pkg/menu"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
-	"github.com/wailsapp/wails/v2/pkg/options/systray"
 )
 
 //go:embed all:web/dist
 var assets embed.FS
-
-//go:embed assets/mascot.png
-var mascotBytes []byte
 
 func main() {
 	app := NewApp()
@@ -31,16 +26,6 @@ func main() {
 			break
 		}
 	}
-
-	// Build the system tray context menu
-	trayMenu := menu.NewMenu()
-	trayMenu.AddText("Show Dashboard", nil, func(clickedData *menu.CallbackData) {
-		app.Show()
-	})
-	trayMenu.AddSeparator()
-	trayMenu.AddText("Quit", nil, func(clickedData *menu.CallbackData) {
-		app.Quit()
-	})
 
 	err := wails.Run(&options.App{
 		Title:         "Porque Minecraft Server Manager",
@@ -73,13 +58,6 @@ func main() {
 		OnBeforeClose:    app.OnBeforeClose,
 		Bind: []interface{}{
 			app,
-		},
-		Systray: &systray.Options{
-			Title:       "Porque",
-			Tooltip:     "Porque Minecraft Server Manager",
-			Icon:        mascotBytes,
-			Menu:        trayMenu,
-			OnLeftClick: app.Show,
 		},
 	})
 

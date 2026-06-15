@@ -83,6 +83,9 @@ func (s *Service) Create(ctx context.Context, serverID uuid.UUID) (*db.Backup, e
 		return nil, apperr.Internal(fmt.Errorf("RCON save-all failed: %w", err))
 	}
 
+	// Wait 1 second for the server to perform the saves asynchronously on disk
+	time.Sleep(1 * time.Second)
+
 	sha, err := createArchiveFromDir(srv.VolumeName, path)
 	if err != nil {
 		_ = os.Remove(path)

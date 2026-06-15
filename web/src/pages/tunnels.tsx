@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
-import { Cable, ArrowUpRight, Plus, LogOut, KeyRound } from "lucide-react";
+import { Cable, Plus, LogOut, KeyRound, Copy, RefreshCw, Smartphone, Monitor } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
+import { useWebSocket } from "@/lib/ws";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { TunnelStatusBadge } from "@/components/tunnel-status-badge";
@@ -14,6 +14,7 @@ import { Card, CardContent } from "@/components/ui/card";
 export default function TunnelsPage() {
   const qc = useQueryClient();
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
+
 
   // Poll accounts rapidly if one is currently in the claiming process
   const { data: accounts, isLoading: accountsLoading } = useQuery({
@@ -34,7 +35,10 @@ export default function TunnelsPage() {
     refetchInterval: 6000,
   });
 
-  const { data: servers } = useQuery({ queryKey: ["servers"], queryFn: api.listServers });
+  const { data: servers, isLoading: serversLoading } = useQuery({
+    queryKey: ["servers"],
+    queryFn: api.listServers,
+  });
 
   const claim = useMutation({
     mutationFn: () => api.startPlayitClaim(),
@@ -59,10 +63,57 @@ export default function TunnelsPage() {
     onError: (e) => toast.error(e instanceof ApiError ? e.message : "Disconnect failed"),
   });
 
-  const nameFor = (id: string) => servers?.find((s) => s.id === id)?.name ?? id.slice(0, 8);
+  // Create both Java and Bedrock tunnels at once
+  const createBothTunnels = useMutation({
+    mutationFn: (serverId: string) => api.createJavaAndBedrockTunnels(serverId),
+    onSuccess: () => {
+      toast.success("Java & Bedrock tunnels created!");
+      qc.invalidateQueries({ queryKey: ["tunnels"] });
+    },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Failed to create tunnels"),
+  });
+
+  // Rescan tunnels
+  const rescan = useMutation({
+    mutationFn: (serverId: string) => api.rescanTunnel(serverId),
+    onSuccess: (t) => {
+      if (t.some((x) => x.public_address)) {
+        toast.success("Tunnels address resolved!");
+      } else {
+        toast.message("Checking Playit.gg — address still being assigned");
+      }
+      qc.invalidateQueries({ queryKey: ["tunnels"] });
+    },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Rescan failed"),
+  });
+
+  // Detach tunnels
+  const detach = useMutation({
+    mutationFn: (args: { serverId: string; proto: "tcp" | "udp" }) =>
+      api.detachTunnel(args.serverId, args.proto),
+    onSuccess: () => {
+      toast.success("Tunnel detached");
+      qc.invalidateQueries({ queryKey: ["tunnels"] });
+    },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Detach failed"),
+  });
 
   const activeAccount = accounts?.find((a) => a.status !== "claiming");
   const claimingAccount = accounts?.find((a) => a.status === "claiming");
+
+  // Find the running server
+  const runningServer = servers?.find((s) => s.state === "running" || s.state === "starting");
+
+  // WebSocket realtime update subscription
+  useWebSocket(runningServer ? `/ws/playit/${runningServer.id}` : null, () => {
+    qc.invalidateQueries({ queryKey: ["tunnels"] });
+  });
+
+  // Filter tunnels for the running server
+  const javaTunnel = tunnels?.find((t) => t.proto === "tcp" && runningServer && t.server_id === runningServer.id);
+  const bedrockTunnel = tunnels?.find((t) => t.proto === "udp" && runningServer && t.server_id === runningServer.id);
+
+  const hasTunnels = !!(javaTunnel || bedrockTunnel);
 
   return (
     <div className="space-y-7">
@@ -139,40 +190,168 @@ export default function TunnelsPage() {
         </div>
       )}
 
-      {/* Tunnels List Section */}
-      <div className="space-y-4">
-        <h3 className="font-display text-base font-bold text-ink">Active Tunnels</h3>
-        {tunnelsLoading ? (
-          <Skeleton className="h-24 w-full" />
-        ) : tunnels && tunnels.length > 0 ? (
-          <div className="space-y-2">
-            {tunnels.map((t) => (
-              <div key={t.id} className="panel flex items-center justify-between gap-4 px-5 py-4">
-                <div className="flex min-w-0 items-center gap-3">
-                  <Cable className="h-5 w-5 shrink-0 text-gold" />
-                  <div className="min-w-0">
-                    <Link
-                      to={`/servers/${t.server_id}`}
-                      className="group inline-flex items-center gap-1 font-display text-base font-semibold text-ink hover:text-gold"
-                    >
-                      {nameFor(t.server_id)}
-                      <ArrowUpRight className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-100" />
-                    </Link>
-                    <p className="truncate font-mono text-xs text-faint">
-                      {t.public_address ?? "awaiting address…"}
-                    </p>
-                  </div>
-                </div>
-                <TunnelStatusBadge status={t.status} />
+      {/* Tunnels Section */}
+      {activeAccount && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-display text-base font-bold text-ink">Active Tunnels</h3>
+              {runningServer && (
+                <p className="text-xs text-muted">
+                  Exposing server: <span className="text-gold font-semibold">{runningServer.name}</span>
+                </p>
+              )}
+            </div>
+
+            {runningServer && (
+              <div className="flex items-center gap-2">
+                {hasTunnels && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => rescan.mutate(runningServer.id)}
+                    disabled={rescan.isPending}
+                    className="text-xs flex items-center gap-1.5"
+                  >
+                    {rescan.isPending ? <Spinner className="h-3.5 w-3.5" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                    Rescan
+                  </Button>
+                )}
+                {!hasTunnels && (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => createBothTunnels.mutate(runningServer.id)}
+                    disabled={createBothTunnels.isPending}
+                    className="text-xs flex items-center gap-1.5"
+                  >
+                    {createBothTunnels.isPending ? <Spinner className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+                    Add Tunnels
+                  </Button>
+                )}
               </div>
-            ))}
+            )}
           </div>
-        ) : (
-          <div className="panel grid h-44 place-items-center text-center text-sm text-faint">
-            No active tunnels. Attach one from a server&apos;s Tunnel tab.
-          </div>
-        )}
-      </div>
+
+          {tunnelsLoading || serversLoading ? (
+            <Skeleton className="h-28 w-full" />
+          ) : !runningServer ? (
+            <div className="panel flex flex-col items-center justify-center p-8 text-center border border-border bg-surface/30">
+              <Cable className="h-7 w-7 text-faint mb-2.5" />
+              <p className="text-sm text-muted font-medium">No Server is Currently Running</p>
+              <p className="text-xs text-faint mt-1 max-w-sm">
+                Start a server from the servers list page to add or manage public playit.gg tunnels.
+              </p>
+            </div>
+          ) : !hasTunnels ? (
+            <div className="panel flex flex-col items-center justify-center p-8 text-center border border-border bg-surface/30">
+              <Cable className="h-7 w-7 text-faint mb-2.5" />
+              <p className="text-sm text-muted font-medium">No Tunnels Created Yet</p>
+              <p className="text-xs text-faint mt-1 max-w-sm">
+                Expose this server to the internet by clicking "Add Tunnels" above. It will automatically create both Java and Bedrock connection paths.
+              </p>
+            </div>
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-2">
+              {/* Java Tunnel Card */}
+              <div className="panel border border-border p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="inline-flex items-center gap-2 font-display text-sm font-semibold text-ink">
+                    <Monitor className="h-4.5 w-4.5 text-gold shrink-0" />
+                    Java Connection (TCP)
+                  </span>
+                  {javaTunnel ? (
+                    <TunnelStatusBadge status={javaTunnel.status} />
+                  ) : (
+                    <span className="text-[0.68rem] text-faint font-semibold uppercase tracking-wider bg-surface-dark border border-border/60 px-2 py-0.5 rounded">
+                      Not Configured
+                    </span>
+                  )}
+                </div>
+
+                {javaTunnel && (
+                  <div className="space-y-3">
+                    <div>
+                      <p className="eyebrow mb-1">Public address</p>
+                      {javaTunnel.public_address ? (
+                        <button
+                          onClick={() => {
+                            navigator.clipboard?.writeText(javaTunnel.public_address!);
+                            toast.success("Java address copied");
+                          }}
+                          className="group inline-flex items-center gap-2 rounded-md border border-border bg-bg/50 px-2.5 py-1.5 font-mono text-[0.72rem] text-gold w-full text-left justify-between"
+                        >
+                          <span className="truncate">{javaTunnel.public_address}</span>
+                          <Copy className="h-3 w-3 text-faint shrink-0 group-hover:text-gold" />
+                        </button>
+                      ) : (
+                        <p className="font-mono text-xs text-faint">Awaiting address allocation...</p>
+                      )}
+                    </div>
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onClick={() => detach.mutate({ serverId: runningServer.id, proto: "tcp" })}
+                      disabled={detach.isPending}
+                      className="text-xs"
+                    >
+                      Delete Java Tunnel
+                    </Button>
+                  </div>
+                )}
+              </div>
+
+              {/* Bedrock Tunnel Card */}
+              <div className="panel border border-border p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="inline-flex items-center gap-2 font-display text-sm font-semibold text-ink">
+                    <Smartphone className="h-4.5 w-4.5 text-gold shrink-0" />
+                    Bedrock Connection (UDP)
+                  </span>
+                  {bedrockTunnel ? (
+                    <TunnelStatusBadge status={bedrockTunnel.status} />
+                  ) : (
+                    <span className="text-[0.68rem] text-faint font-semibold uppercase tracking-wider bg-surface-dark border border-border/60 px-2 py-0.5 rounded">
+                      Not Configured
+                    </span>
+                  )}
+                </div>
+
+                {bedrockTunnel && (
+                  <div className="space-y-3">
+                    <div>
+                      <p className="eyebrow mb-1">Public address</p>
+                      {bedrockTunnel.public_address ? (
+                        <button
+                          onClick={() => {
+                            navigator.clipboard?.writeText(bedrockTunnel.public_address!);
+                            toast.success("Bedrock address copied");
+                          }}
+                          className="group inline-flex items-center gap-2 rounded-md border border-border bg-bg/50 px-2.5 py-1.5 font-mono text-[0.72rem] text-gold w-full text-left justify-between"
+                        >
+                          <span className="truncate">{bedrockTunnel.public_address}</span>
+                          <Copy className="h-3 w-3 text-faint shrink-0 group-hover:text-gold" />
+                        </button>
+                      ) : (
+                        <p className="font-mono text-xs text-faint">Awaiting address allocation...</p>
+                      )}
+                    </div>
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onClick={() => detach.mutate({ serverId: runningServer.id, proto: "udp" })}
+                      disabled={detach.isPending}
+                      className="text-xs"
+                    >
+                      Delete Bedrock Tunnel
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Disconnect Confirmation */}
       <ConfirmDialog

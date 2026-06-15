@@ -44,6 +44,7 @@ export function useWebSocket(path: string | null, onMessage: (data: string) => v
 
     // Subscribe to Wails event
     EventsOn(eventName, (data: any) => {
+      console.log("[useWebSocket] Received event:", eventName, data);
       setStatus("open");
       if (typeof data === "string") {
         onMessage(data);

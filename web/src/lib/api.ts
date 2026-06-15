@@ -49,6 +49,14 @@ export interface Backup {
   created_at: string;
 }
 
+export interface AppLog {
+  id: string;
+  server_id: string;
+  server_name: string;
+  message: string;
+  created_at: string;
+}
+
 export type TunnelStatus = "starting" | "connected" | "disconnected" | "error";
 
 export interface ServerTunnel {
@@ -145,6 +153,8 @@ export const api = {
   stopServer: (id: string) => call<void>(App.StopServer, id),
   restartServer: (id: string) => call<void>(App.RestartServer, id),
   deleteServer: (id: string) => call<void>(App.DeleteServer, id),
+  deleteServerRecord: (id: string) => call<void>(App.DeleteServerRecord, id),
+
 
   getMetrics: (id: string, limit = 120) =>
     call<ServerMetric[]>(App.GetServerMetrics, id, limit).then((m) => m ?? []),
@@ -180,13 +190,10 @@ export const api = {
     body: { enabled: boolean; interval_minutes: number; keep: number },
   ) => call<Server>(App.UpdateBackupSchedule, id, body.enabled, body.interval_minutes, body.keep),
 
-  iconUrl: (id: string) => `/api/servers/${id}/icon`,
-  uploadIcon: async (id: string, file: File): Promise<void> => {
-    const path = (file as any).path;
-    if (path) {
-      await call(App.UploadServerIcon, id, path);
-    }
-  },
+  // Returns a `data:image/png;base64,...` URL, or throws if no icon is set.
+  getIcon: (id: string) => call<string>(App.GetServerIcon, id),
+  selectFile: () => call<string>(App.SelectFile),
+  uploadIconPath: (id: string, path: string) => call<void>(App.UploadServerIcon, id, path),
 
   listBackups: (id: string) => call<Backup[]>(App.ListBackups, id).then((b) => b ?? []),
   createBackup: (id: string) => call<Backup>(App.CreateBackup, id),
@@ -197,8 +204,15 @@ export const api = {
     call<void>(App.DetachTunnel, id, proto || ""),
   createTunnel: (id: string, kind: "java" | "bedrock") =>
     call<ServerTunnel>(App.CreateTunnel, id, kind),
+  createJavaAndBedrockTunnels: (id: string) =>
+    call<ServerTunnel[]>(App.CreateJavaAndBedrockTunnels, id).then((t) => t ?? []),
   rescanTunnel: (id: string) => call<ServerTunnel[]>(App.RescanTunnel, id).then((t) => t ?? []),
+  sendServerCommand: (id: string, command: string) => call<string>(App.SendServerCommand, id, command),
   listTunnels: () => call<ServerTunnel[]>(App.ListTunnels).then((t) => t ?? []),
+
+  getGeyserStatus: (id: string) => call<any>(App.GetGeyserStatus, id),
+  installOrUpdateGeyser: (id: string) => call<any>(App.InstallOrUpdateGeyser, id),
+
 
   listAccounts: () => call<PlayitAccount[]>(App.ListPlayitAccounts).then((a) => a ?? []),
   createAccount: (name: string, secret_key: string) =>
@@ -246,4 +260,6 @@ export const api = {
     ),
   quitApp: () => call<void>(App.Quit),
   selectFolder: () => call<string>(App.SelectFolder),
+  listAppLogs: () => call<AppLog[]>(App.ListAppLogs).then((l) => l ?? []),
+  getServerLogs: (serverId: string) => call<string>(App.GetServerLogs, serverId),
 };

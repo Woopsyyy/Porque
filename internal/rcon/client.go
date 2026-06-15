@@ -139,7 +139,7 @@ func (c *Client) SaveOff(ctx context.Context) error {
 
 // SaveAll flushes all dirty chunks to disk.
 func (c *Client) SaveAll(ctx context.Context) error {
-	_, err := c.Run(ctx, "save-all", "flush")
+	_, err := c.Run(ctx, "save-all")
 	return err
 }
 

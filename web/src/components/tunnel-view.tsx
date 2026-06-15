@@ -1,20 +1,27 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Cable, Copy, ExternalLink, Link2Off, RefreshCw } from "lucide-react";
+import { Cable, Copy, ExternalLink, Link2Off, Plus, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
-import { api, ApiError, type PlayitAccount, type Server } from "@/lib/api";
+import { api, ApiError, type PlayitAccount, type Server, type ServerTunnel } from "@/lib/api";
 import { useWebSocket } from "@/lib/ws";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/misc";
 import { TunnelStatusBadge } from "@/components/tunnel-status-badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
-// The bundled-account mock surfaces a claim_url while linking.
 type AccountWithClaim = PlayitAccount & { claim_url?: string };
+
+const protoLabel = (proto: string) => (proto === "udp" ? "Bedrock" : "Java");
 
 export function TunnelView({ server }: { server: Server }) {
   const qc = useQueryClient();
   const running = server.state === "running";
 
-  const { data: tunnel } = useQuery({
+  const { data: tunnels } = useQuery({
     queryKey: ["tunnel", server.id],
     queryFn: () => api.getTunnels(server.id),
     refetchInterval: 5000,
@@ -44,15 +51,14 @@ export function TunnelView({ server }: { server: Server }) {
   const rescan = useMutation({
     mutationFn: () => api.rescanTunnel(server.id),
     onSuccess: (t) => {
-      const first = Array.isArray(t) && t.length > 0 ? t[0] : null;
-      if (first?.public_address) toast.success("Public address assigned");
+      if (t.some((x) => x.public_address)) toast.success("Public address assigned");
       else toast.message("Still being assigned — try again in a moment");
       invalidate();
     },
     onError: onErr,
   });
   const detach = useMutation({
-    mutationFn: () => api.detachTunnel(server.id),
+    mutationFn: (proto: "tcp" | "udp") => api.detachTunnel(server.id, proto),
     onSuccess: () => {
       toast.success("Tunnel detached");
       invalidate();
@@ -60,132 +66,144 @@ export function TunnelView({ server }: { server: Server }) {
     onError: onErr,
   });
 
-  const active = Array.isArray(tunnel) && tunnel.length > 0 ? tunnel[0] : null;
-  const claiming = (accounts as AccountWithClaim[] | undefined)?.find(
-    (a) => a.status === "claiming",
-  );
+  const list = tunnels ?? [];
+  const hasJava = list.some((t) => t.proto === "tcp");
+  const hasBedrock = list.some((t) => t.proto === "udp");
+  const claiming = (accounts as AccountWithClaim[] | undefined)?.find((a) => a.status === "claiming");
 
-  // ---- Active tunnel -------------------------------------------------------
-  if (active) {
-    return (
-      <div className="panel max-w-xl p-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-muted">
-            <Cable className="h-4 w-4 text-gold" />
-            <span className="eyebrow !text-muted">Playit tunnel</span>
-          </div>
-          <TunnelStatusBadge status={active.status} />
-        </div>
-
-        <div className="mt-5">
-          <p className="eyebrow mb-1.5">Public address</p>
-          {active.public_address ? (
-            <button
-              onClick={() => {
-                navigator.clipboard?.writeText(active.public_address!);
-                toast.success("Address copied");
-              }}
-              className="group inline-flex items-center gap-2 rounded-md border border-border bg-bg/60 px-3 py-2 font-mono text-sm text-gold"
-            >
-              {active.public_address}
-              <Copy className="h-3.5 w-3.5 text-faint group-hover:text-gold" />
-            </button>
-          ) : (
-            <p className="font-mono text-sm text-faint">
-              Not assigned yet — press Rescan once the agent connects.
-            </p>
-          )}
-        </div>
-
-        <div className="mt-6 flex items-center gap-2 border-t border-border pt-4">
-          <Button variant="outline" onClick={() => rescan.mutate()} disabled={rescan.isPending}>
-            {rescan.isPending ? <Spinner className="h-4 w-4" /> : <RefreshCw className="h-4 w-4" />}
-            Rescan
-          </Button>
-          <Button variant="danger" onClick={() => detach.mutate()} disabled={detach.isPending}>
-            {detach.isPending ? <Spinner className="h-4 w-4" /> : <Link2Off className="h-4 w-4" />}
-            Detach tunnel
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
-  // ---- Linking the bundled account ----------------------------------------
-  if (claiming) {
-    return (
-      <div className="panel max-w-xl p-6">
+  return (
+    <div className="max-w-xl space-y-4">
+      <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-muted">
           <Cable className="h-4 w-4 text-gold" />
-          <span className="eyebrow !text-muted">Linking Playit.gg</span>
+          <span className="eyebrow !text-muted">Playit.gg tunnels</span>
         </div>
-        <p className="mt-3 text-sm text-muted">
-          One-time setup: approve the bundled agent in your browser. After that, tunnels are
-          fully automatic.
-        </p>
-        {claiming.claim_url && (
-          <Button asChild variant="primary" className="mt-4">
-            <a href={claiming.claim_url} target="_blank" rel="noreferrer">
-              <ExternalLink className="h-4 w-4" />
-              Approve agent
-            </a>
-          </Button>
-        )}
-        <p className="mt-3 inline-flex items-center gap-2 font-mono text-xs text-faint">
-          <Spinner className="h-3.5 w-3.5" />
-          Waiting for approval…
-        </p>
-      </div>
-    );
-  }
-
-  // ---- Create a tunnel -----------------------------------------------------
-  return (
-    <div className="panel max-w-xl p-6">
-      <div className="flex items-center gap-2 text-muted">
-        <Cable className="h-4 w-4 text-gold" />
-        <span className="eyebrow !text-muted">Expose with Playit.gg</span>
-      </div>
-      <p className="mt-3 text-sm text-muted">
-        Launches a Playit agent that shares this server&apos;s network and forwards its port
-        through a public tunnel. Choose the protocol for how players connect.
-      </p>
-
-      <div className="mt-5 flex flex-wrap gap-2">
-        <Button
-          variant="primary"
-          onClick={() => create.mutate("java")}
-          disabled={!running || create.isPending}
-          title={running ? "" : "Server must be running"}
-        >
-          {create.isPending && create.variables === "java" ? (
-            <Spinner className="h-4 w-4" />
-          ) : (
-            <Cable className="h-4 w-4" />
+        <div className="flex items-center gap-2">
+          {list.length > 0 && (
+            <Button variant="outline" size="sm" onClick={() => rescan.mutate()} disabled={rescan.isPending}>
+              {rescan.isPending ? <Spinner className="h-3.5 w-3.5" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              Rescan
+            </Button>
           )}
-          Create Java tunnel
-        </Button>
-        <Button
-          variant="secondary"
-          onClick={() => create.mutate("bedrock")}
-          disabled={!running || create.isPending}
-          title={running ? "" : "Server must be running"}
-        >
-          {create.isPending && create.variables === "bedrock" ? (
-            <Spinner className="h-4 w-4" />
-          ) : (
-            <Cable className="h-4 w-4" />
-          )}
-          Create Bedrock tunnel
-        </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="primary" size="sm" disabled={!running || create.isPending}>
+                {create.isPending ? <Spinner className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+                Add tunnel
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                disabled={hasJava}
+                onSelect={() => create.mutate("java")}
+              >
+                <Cable className="h-4 w-4" />
+                Create Java tunnel
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={hasBedrock}
+                onSelect={() => create.mutate("bedrock")}
+              >
+                <Cable className="h-4 w-4" />
+                Create Bedrock tunnel
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
 
-      <p className="mt-3 font-mono text-[0.7rem] text-faint">
-        Java → TCP · port 25565 &nbsp;·&nbsp; Bedrock → UDP · port 19132 (needs Geyser)
-      </p>
-      {!running && (
-        <p className="mt-2 text-xs text-warn">The server must be running to create a tunnel.</p>
+      {claiming && (
+        <div className="panel p-5">
+          <span className="eyebrow">Linking Playit.gg</span>
+          <p className="mt-2 text-sm text-muted">
+            One-time setup: approve the bundled agent in your browser, then tunnels are automatic.
+          </p>
+          {claiming.claim_url && (
+            <Button asChild variant="primary" size="sm" className="mt-3">
+              <a href={claiming.claim_url} target="_blank" rel="noreferrer">
+                <ExternalLink className="h-4 w-4" />
+                Approve agent
+              </a>
+            </Button>
+          )}
+        </div>
       )}
+
+      {list.length === 0 ? (
+        <div className="panel px-6 py-10 text-center">
+          <p className="text-sm text-muted">
+            No tunnels yet. Use <span className="text-ink">Add tunnel</span> to expose this server —
+            Java (TCP) and/or Bedrock (UDP) can run at the same time.
+          </p>
+          {!running && (
+            <p className="mt-2 text-xs text-warn">The server must be running to create a tunnel.</p>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {list.map((t) => (
+            <TunnelRow
+              key={t.id}
+              tunnel={t}
+              onDetach={() => detach.mutate(t.proto === "udp" ? "udp" : "tcp")}
+              detaching={detach.isPending && detach.variables === (t.proto === "udp" ? "udp" : "tcp")}
+            />
+          ))}
+        </div>
+      )}
+
+      <p className="font-mono text-[0.68rem] text-faint">
+        Java → TCP · 25565 &nbsp;·&nbsp; Bedrock → UDP · 19132 (needs Geyser)
+      </p>
+    </div>
+  );
+}
+
+function TunnelRow({
+  tunnel,
+  onDetach,
+  detaching,
+}: {
+  tunnel: ServerTunnel;
+  onDetach: () => void;
+  detaching: boolean;
+}) {
+  return (
+    <div className="panel p-5">
+      <div className="flex items-center justify-between">
+        <span className="inline-flex items-center gap-2 font-display text-base font-semibold text-ink">
+          <Cable className="h-4 w-4 text-gold" />
+          {protoLabel(tunnel.proto)}
+        </span>
+        <TunnelStatusBadge status={tunnel.status} />
+      </div>
+
+      <div className="mt-4">
+        <p className="eyebrow mb-1.5">Public address</p>
+        {tunnel.public_address ? (
+          <button
+            onClick={() => {
+              navigator.clipboard?.writeText(tunnel.public_address!);
+              toast.success("Address copied");
+            }}
+            className="group inline-flex items-center gap-2 rounded-md border border-border bg-bg/60 px-3 py-2 font-mono text-sm text-gold"
+          >
+            {tunnel.public_address}
+            <Copy className="h-3.5 w-3.5 text-faint group-hover:text-gold" />
+          </button>
+        ) : (
+          <p className="font-mono text-sm text-faint">
+            Not assigned yet — press Rescan once the agent connects.
+          </p>
+        )}
+      </div>
+
+      <div className="mt-4 border-t border-border pt-3">
+        <Button variant="danger" size="sm" onClick={onDetach} disabled={detaching}>
+          {detaching ? <Spinner className="h-3.5 w-3.5" /> : <Link2Off className="h-3.5 w-3.5" />}
+          Detach
+        </Button>
+      </div>
     </div>
   );
 }

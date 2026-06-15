@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Boxes, Cable, Settings, LogOut } from "lucide-react";
+import { Boxes, Cable, Settings, LogOut, Terminal } from "lucide-react";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Logo } from "@/components/logo";
@@ -9,6 +9,7 @@ import { Logo } from "@/components/logo";
 const NAV = [
   { to: "/", label: "Servers", icon: Boxes, end: true },
   { to: "/tunnels", label: "Tunnels", icon: Cable, end: false },
+  { to: "/logs", label: "Logs", icon: Terminal, end: false },
   { to: "/settings", label: "Settings", icon: Settings, end: false },
 ];
 
@@ -97,13 +98,6 @@ export function AppShell({ children }: { children: ReactNode }) {
               <span className="h-1.5 w-1.5 animate-pulsedot rounded-full bg-running" />
               {running} running
             </span>
-
-            <div className="flex items-center gap-2 rounded-md border border-border bg-surface-2 px-2.5 py-1.5 text-sm text-ink">
-              <span className="grid h-6 w-6 place-items-center rounded-full bg-gold/15 font-mono text-xs font-bold text-gold">
-                O
-              </span>
-              <span className="hidden sm:inline">owner</span>
-            </div>
           </div>
         </header>
 

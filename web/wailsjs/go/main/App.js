@@ -10,6 +10,10 @@ export function CreateBackup(arg1) {
   return window['go']['main']['App']['CreateBackup'](arg1);
 }
 
+export function CreateJavaAndBedrockTunnels(arg1) {
+  return window['go']['main']['App']['CreateJavaAndBedrockTunnels'](arg1);
+}
+
 export function CreatePlayitAccount(arg1, arg2) {
   return window['go']['main']['App']['CreatePlayitAccount'](arg1, arg2);
 }
@@ -34,6 +38,10 @@ export function DeleteServer(arg1) {
   return window['go']['main']['App']['DeleteServer'](arg1);
 }
 
+export function DeleteServerRecord(arg1) {
+  return window['go']['main']['App']['DeleteServerRecord'](arg1);
+}
+
 export function DetachTunnel(arg1, arg2) {
   return window['go']['main']['App']['DetachTunnel'](arg1, arg2);
 }
@@ -42,12 +50,20 @@ export function DetectServerDirectory(arg1) {
   return window['go']['main']['App']['DetectServerDirectory'](arg1);
 }
 
+export function GetGeyserStatus(arg1) {
+  return window['go']['main']['App']['GetGeyserStatus'](arg1);
+}
+
 export function GetServer(arg1) {
   return window['go']['main']['App']['GetServer'](arg1);
 }
 
 export function GetServerIcon(arg1) {
   return window['go']['main']['App']['GetServerIcon'](arg1);
+}
+
+export function GetServerLogs(arg1) {
+  return window['go']['main']['App']['GetServerLogs'](arg1);
 }
 
 export function GetServerMetrics(arg1, arg2) {
@@ -80,6 +96,14 @@ export function ImportServerFromZip(arg1, arg2, arg3, arg4, arg5, arg6) {
 
 export function InstallMods(arg1, arg2) {
   return window['go']['main']['App']['InstallMods'](arg1, arg2);
+}
+
+export function InstallOrUpdateGeyser(arg1) {
+  return window['go']['main']['App']['InstallOrUpdateGeyser'](arg1);
+}
+
+export function ListAppLogs() {
+  return window['go']['main']['App']['ListAppLogs']();
 }
 
 export function ListBackups(arg1) {
@@ -124,6 +148,10 @@ export function SelectFile() {
 
 export function SelectFolder() {
   return window['go']['main']['App']['SelectFolder']();
+}
+
+export function SendServerCommand(arg1, arg2) {
+  return window['go']['main']['App']['SendServerCommand'](arg1, arg2);
 }
 
 export function Show() {

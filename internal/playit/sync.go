@@ -3,13 +3,17 @@ package playit
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/google/uuid"
 
@@ -47,8 +51,165 @@ func NewManager(store *db.Store, client PlayitClient, pub StatusPublisher, appDa
 	if pub == nil {
 		pub = nopPublisher{}
 	}
-	return &Manager{store: store, client: client, pub: pub, appDataDir: appDataDir}
+	m := &Manager{store: store, client: client, pub: pub, appDataDir: appDataDir}
+	go m.startRealtimeSync()
+	return m
 }
+
+func (m *Manager) startRealtimeSync() {
+	// Periodic sync every 2 seconds
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		ctx := context.Background()
+
+		// Get playit accounts
+		accts, err := m.store.ListPlayitAccounts(ctx)
+		if err != nil || len(accts) == 0 {
+			continue
+		}
+		secretKey := accts[0].SecretKey
+		accountID := accts[0].ID
+
+		// Fetch playit tunnels from API
+		apiTunnels, err := m.client.ListTunnels(ctx, secretKey)
+		if err != nil {
+			log.Printf("[Sync] ListTunnels failed: %v\n", err)
+			continue
+		}
+
+		// Map API tunnels by proto
+		apiProtos := make(map[string]bool)
+		for _, at := range apiTunnels {
+			apiProtos[at.Proto] = true
+		}
+
+		servers, err := m.store.ListServers(ctx)
+		if err != nil {
+			continue
+		}
+
+		for _, srv := range servers {
+			if srv.State != db.StateRunning && srv.State != db.StateStarting {
+				continue
+			}
+
+			// Get active tunnels in DB for this server
+			dbTunnels, err := m.store.ActiveServerTunnels(ctx, srv.ID)
+			if err != nil {
+				continue
+			}
+
+			// Prune DB tunnels that were deleted on the playit.gg website
+			for _, dbT := range dbTunnels {
+				if dbT.Proto != "" && !apiProtos[dbT.Proto] {
+					log.Printf("[Sync] Pruning deleted tunnel in DB: %s %s\n", srv.Name, dbT.Proto)
+					_ = m.store.DeactivateServerTunnelByProto(ctx, srv.ID, dbT.Proto)
+					m.pub.PublishStatus(statusTopic(srv.ID), map[string]any{
+						"server_id": srv.ID.String(),
+						"status":    db.TunnelDisconnected,
+						"proto":     dbT.Proto,
+						"at":        time.Now().UTC(),
+					})
+				}
+			}
+
+			// Re-fetch active tunnels after pruning to get the updated list
+			dbTunnels, err = m.store.ActiveServerTunnels(ctx, srv.ID)
+			if err != nil {
+				continue
+			}
+
+			// Ensure the Playit sidecar process is running if there are active tunnels
+			if len(dbTunnels) > 0 {
+				sidecarAlive := false
+				var storedPidStr string
+				for _, t := range dbTunnels {
+					if t.SidecarContainerID != nil && *t.SidecarContainerID != "" {
+						storedPidStr = *t.SidecarContainerID
+						pid, err := strconv.Atoi(*t.SidecarContainerID)
+						if err == nil && isProcessAlive(pid) {
+							sidecarAlive = true
+							break
+						}
+					}
+				}
+
+				if !sidecarAlive {
+					log.Printf("[Sync] Playit sidecar not running for server %s (stored PID: %s). Launching...\n", srv.Name, storedPidStr)
+					account := accts[0]
+					newPidStr, err := m.ensureSidecar(ctx, &srv, &account)
+					if err != nil {
+						log.Printf("[Sync] Failed to ensure Playit sidecar for server %s: %v\n", srv.Name, err)
+					} else {
+						log.Printf("[Sync] Playit sidecar started for server %s with PID %s\n", srv.Name, newPidStr)
+						// Update all active tunnels of this server with the new PID
+						err = m.store.UpdateServerTunnelsPID(ctx, srv.ID, newPidStr)
+						if err != nil {
+							log.Printf("[Sync] Failed to update tunnels PID in DB: %v\n", err)
+						}
+						// Update our local list of tunnels for the rest of this sync iteration
+						for i := range dbTunnels {
+							dbTunnels[i].SidecarContainerID = &newPidStr
+						}
+					}
+				}
+			}
+
+			// Map DB tunnels by proto
+			dbMap := make(map[string]*db.ServerTunnel)
+			for i := range dbTunnels {
+				dbMap[dbTunnels[i].Proto] = &dbTunnels[i]
+			}
+
+			// Match with API tunnels
+			for _, at := range apiTunnels {
+				if at.PublicAddress == "" {
+					continue
+				}
+
+				row, exists := dbMap[at.Proto]
+				if exists {
+					// Update existing tunnel if address or status changed
+					needsUpdate := false
+					if row.PublicAddress == nil || *row.PublicAddress != at.PublicAddress {
+						needsUpdate = true
+						row.PublicAddress = &at.PublicAddress
+					}
+					if row.Status != db.TunnelConnected {
+						needsUpdate = true
+						row.Status = db.TunnelConnected
+					}
+
+					if needsUpdate {
+						log.Printf("[Sync] Updating existing tunnel in DB: %s %s to %s\n", srv.Name, row.Proto, at.PublicAddress)
+						_ = m.store.UpdateServerTunnel(ctx, row.ID, row.Status, row.PublicAddress)
+						m.publish(srv.ID, row)
+					}
+				} else {
+					// Auto-create tunnel row if it exists in API but not in DB
+					newRow := &db.ServerTunnel{
+						ServerID:        srv.ID,
+						PlayitAccountID: &accountID,
+						Proto:           at.Proto,
+						PublicAddress:   &at.PublicAddress,
+						Status:          db.TunnelConnected,
+						Active:          true,
+					}
+					log.Printf("[Sync] Auto-creating tunnel in DB: %s %s address: %s\n", srv.Name, at.Proto, at.PublicAddress)
+					insertErr := m.store.CreateServerTunnel(ctx, newRow)
+					if insertErr != nil {
+						log.Printf("[Sync] Auto-create failed: %v\n", insertErr)
+					} else {
+						m.publish(srv.ID, newRow)
+					}
+				}
+			}
+		}
+	}
+}
+
 
 func sidecarName(serverName string) string { return "mc-playit-" + slugify(serverName) }
 
@@ -79,7 +240,8 @@ func slugify(name string) string {
 func statusTopic(serverID uuid.UUID) string { return "playit:" + serverID.String() }
 
 // Attach launches a Playit agent process for a running server using the given
-// account's secret key.
+// account's secret key. It creates one DB tunnel row per protocol (tcp/udp)
+// so each can be individually addressed and rescanned.
 func (m *Manager) Attach(ctx context.Context, serverID, accountID uuid.UUID) (*db.ServerTunnel, error) {
 	srv, err := m.store.GetServer(ctx, serverID)
 	if err != nil {
@@ -105,7 +267,7 @@ func (m *Manager) Attach(ctx context.Context, serverID, accountID uuid.UUID) (*d
 		return nil, apperr.Internal(fmt.Errorf("failed to download playit agent: %w", err))
 	}
 
-	cmd := exec.Command(playitPath, "run", "--secret", account.SecretKey)
+	cmd := exec.Command(playitPath, "--secret", account.SecretKey, "start")
 	cmd.Dir = srv.VolumeName
 
 	logFile, err := os.OpenFile(filepath.Join(srv.VolumeName, "playit.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -131,23 +293,64 @@ func (m *Manager) Attach(ctx context.Context, serverID, accountID uuid.UUID) (*d
 		_ = cmd.Wait()
 	}()
 
-	t := &db.ServerTunnel{
-		ServerID:           serverID,
-		PlayitAccountID:    &accountID,
-		SidecarContainerID: &pidStr,
-		Status:             db.TunnelStarting,
-		Active:             true,
-	}
-	if err := m.store.CreateServerTunnel(ctx, t); err != nil {
-		// Kill the process if database insert fails
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+	// Try to fetch existing tunnels from the API so we can create per-proto rows.
+	apiTunnels, _ := m.client.ListTunnels(ctx, account.SecretKey)
+
+	// De-duplicate by proto — keep first occurrence of each.
+	seenProto := map[string]bool{}
+	var protoRows []db.ServerTunnel
+	for _, at := range apiTunnels {
+		if seenProto[at.Proto] {
+			continue
 		}
-		return nil, err
+		seenProto[at.Proto] = true
+		row := db.ServerTunnel{
+			ServerID:           serverID,
+			PlayitAccountID:    &accountID,
+			SidecarContainerID: &pidStr,
+			Proto:              at.Proto,
+			Status:             db.TunnelStarting,
+			Active:             true,
+		}
+		if at.PublicAddress != "" {
+			row.PublicAddress = &at.PublicAddress
+			row.Status = db.TunnelConnected
+		}
+		protoRows = append(protoRows, row)
 	}
-	m.publish(serverID, t)
-	return t, nil
+
+	// Fallback: if API returned nothing, create a single proto-less row.
+	if len(protoRows) == 0 {
+		protoRows = append(protoRows, db.ServerTunnel{
+			ServerID:           serverID,
+			PlayitAccountID:    &accountID,
+			SidecarContainerID: &pidStr,
+			Status:             db.TunnelStarting,
+			Active:             true,
+		})
+	}
+
+	var first *db.ServerTunnel
+	for i := range protoRows {
+		row := &protoRows[i]
+		if err := m.store.CreateServerTunnel(ctx, row); err != nil {
+			if first == nil {
+				// Kill process only on first failure (partial inserts are kept).
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				return nil, err
+			}
+			continue
+		}
+		m.publish(serverID, row)
+		if first == nil {
+			first = row
+		}
+	}
+	return first, nil
 }
+
 
 // Detach stops a server's tunnel process and deactivates the record.
 func (m *Manager) Detach(ctx context.Context, serverID uuid.UUID) error {
@@ -273,7 +476,7 @@ func (m *Manager) EnsureBundledAccount(ctx context.Context) {
 					return
 				}
 				if secret != "" {
-					acct, err := m.store.CreatePlayitAccount(context.Background(), "Bundled Account", secret)
+					acct, err := m.store.CreatePlayitAccount(context.Background(), "Minecraft", secret)
 					if err == nil {
 						_ = m.SyncTunnels(context.Background(), acct.ID)
 					}
@@ -390,7 +593,10 @@ func (m *Manager) ensureSidecar(ctx context.Context, srv *db.Server, account *db
 	if existing, _ := m.store.ActiveServerTunnels(ctx, srv.ID); len(existing) > 0 {
 		for _, t := range existing {
 			if t.SidecarContainerID != nil && *t.SidecarContainerID != "" {
-				return *t.SidecarContainerID, nil
+				pid, err := strconv.Atoi(*t.SidecarContainerID)
+				if err == nil && isProcessAlive(pid) {
+					return *t.SidecarContainerID, nil
+				}
 			}
 		}
 	}
@@ -400,7 +606,7 @@ func (m *Manager) ensureSidecar(ctx context.Context, srv *db.Server, account *db
 		return "", apperr.Internal(fmt.Errorf("failed to download playit agent: %w", err))
 	}
 
-	cmd := exec.Command(playitPath, "run", "--secret", account.SecretKey)
+	cmd := exec.Command(playitPath, "--secret", account.SecretKey, "start")
 	cmd.Dir = srv.VolumeName
 
 	logFile, err := os.OpenFile(filepath.Join(srv.VolumeName, "playit.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -469,10 +675,31 @@ func (m *Manager) CreateTunnelForServer(ctx context.Context, serverID uuid.UUID,
 
 	var addr *string
 	status := db.TunnelStarting
-	if agentID, aerr := m.client.GetAgentID(ctx, account.SecretKey); aerr == nil && agentID != "" {
-		if t, terr := m.client.CreateTunnel(ctx, account.SecretKey, agentID, proto, localPort); terr == nil && t != nil && t.PublicAddress != "" {
-			a := t.PublicAddress
+
+	// Fetch existing tunnels from API first to see if one matches the requested protocol
+	apiTunnels, err := m.client.ListTunnels(ctx, account.SecretKey)
+	var matchedTunnel *Tunnel
+	if err == nil {
+		for _, at := range apiTunnels {
+			if at.Proto == proto {
+				matchedTunnel = &at
+				break
+			}
+		}
+	}
+
+	if matchedTunnel != nil {
+		if matchedTunnel.PublicAddress != "" {
+			a := matchedTunnel.PublicAddress
 			addr, status = &a, db.TunnelConnected
+		}
+	} else {
+		// No existing tunnel matches on Playit.gg, create a new one
+		if agentID, aerr := m.client.GetAgentID(ctx, account.SecretKey); aerr == nil && agentID != "" {
+			if t, terr := m.client.CreateTunnel(ctx, account.SecretKey, agentID, proto, localPort); terr == nil && t != nil && t.PublicAddress != "" {
+				a := t.PublicAddress
+				addr, status = &a, db.TunnelConnected
+			}
 		}
 	}
 
@@ -511,25 +738,32 @@ func (m *Manager) Rescan(ctx context.Context, serverID uuid.UUID) ([]db.ServerTu
 		return active, nil
 	}
 
+	// Build proto→address map from live API tunnels.
+	// Also keep a flat list of all non-empty addresses as fallback.
 	byProto := map[string]string{}
+	var anyAddresses []string
 	for _, t := range tunnels {
 		if t.PublicAddress == "" {
 			continue
 		}
-		p := t.Proto
-		switch p {
-		case "minecraft-java":
-			p = "tcp"
-		case "minecraft-bedrock":
-			p = "udp"
+		if _, ok := byProto[t.Proto]; !ok {
+			byProto[t.Proto] = t.PublicAddress
 		}
-		if _, ok := byProto[p]; !ok {
-			byProto[p] = t.PublicAddress
-		}
+		anyAddresses = append(anyAddresses, t.PublicAddress)
 	}
 
 	for i := range active {
-		if addr, ok := byProto[active[i].Proto]; ok && addr != "" {
+		var addr string
+		if active[i].Proto == "" {
+			// Legacy row created via AttachTunnel (no proto stored).
+			// Use first available address.
+			if len(anyAddresses) > 0 {
+				addr = anyAddresses[0]
+			}
+		} else if a, ok := byProto[active[i].Proto]; ok {
+			addr = a
+		}
+		if addr != "" {
 			_ = m.store.UpdateServerTunnel(ctx, active[i].ID, db.TunnelConnected, &addr)
 			active[i].PublicAddress = &addr
 			active[i].Status = db.TunnelConnected
@@ -537,4 +771,33 @@ func (m *Manager) Rescan(ctx context.Context, serverID uuid.UUID) ([]db.ServerTu
 		}
 	}
 	return active, nil
+}
+
+func isProcessAlive(pid int) bool {
+	if runtime.GOOS == "windows" {
+		kernel32 := syscall.NewLazyDLL("kernel32.dll")
+		openProcess := kernel32.NewProc("OpenProcess")
+		// PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+		handle, _, _ := openProcess.Call(0x1000, 0, uintptr(pid))
+		if handle == 0 {
+			return false
+		}
+		defer syscall.CloseHandle(syscall.Handle(handle))
+
+		getExitCodeProcess := kernel32.NewProc("GetExitCodeProcess")
+		var exitCode uint32
+		r, _, _ := getExitCodeProcess.Call(handle, uintptr(unsafe.Pointer(&exitCode)))
+		if r == 0 {
+			return false
+		}
+		const STILL_ACTIVE = 259
+		return exitCode == STILL_ACTIVE
+	} else {
+		p, err := os.FindProcess(pid)
+		if err != nil {
+			return false
+		}
+		err = p.Signal(syscall.Signal(0))
+		return err == nil
+	}
 }

@@ -5,7 +5,11 @@ import (
 	"context"
 	_ "embed"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,11 +29,12 @@ import (
 	"github.com/woopsy/porque/internal/db"
 	"github.com/woopsy/porque/internal/mcserver"
 	"github.com/woopsy/porque/internal/playit"
+	"github.com/woopsy/porque/internal/rcon"
 	"github.com/woopsy/porque/internal/systray"
 	"github.com/woopsy/porque/internal/worker"
 )
 
-//go:embed assets/mascot.png
+//go:embed assets/mascot_256.png
 var mascotBytes []byte
 
 type App struct {
@@ -59,6 +64,9 @@ type WailsPublisher struct {
 func (wp *WailsPublisher) PublishStatus(topic string, payload any) {
 	if wp.ctx != nil {
 		wailsRuntime.EventsEmit(wp.ctx, "topic:"+topic, payload)
+		log.Printf("[WailsPublisher] Emitted event topic:%s\n", topic)
+	} else {
+		log.Printf("[WailsPublisher] Context is NIL, cannot emit event topic:%s\n", topic)
 	}
 }
 
@@ -73,6 +81,9 @@ func (a *App) startup(ctx context.Context) {
 	_ = os.MkdirAll(appDir, 0755)
 
 	dbPath := filepath.Join(appDir, "porque.db")
+
+	// Write dbPath to a local debug log file to verify what database is used in dev
+	_ = os.WriteFile("porque_db_path.log", []byte(dbPath), 0644)
 
 	conn, err := db.Connect(dbPath)
 	if err != nil {
@@ -114,7 +125,7 @@ func (a *App) startup(ctx context.Context) {
 	go a.worker.Run(context.Background())
 
 	// Start Windows system tray icon
-	systray.Start(mascotBytes, a.Show, a.Quit)
+	systray.Start(mascotBytes, a.Show, a.Quit, a)
 }
 
 func (a *App) GetSystemInfo() map[string]any {
@@ -126,6 +137,10 @@ func (a *App) GetSystemInfo() map[string]any {
 
 func (a *App) ListServers() ([]db.Server, error) {
 	return a.store.ListServers(a.ctx)
+}
+
+func (a *App) ListAppLogs() ([]db.AppLog, error) {
+	return a.store.ListAppLogs(a.ctx)
 }
 
 func (a *App) CreateServer(name string, serverType string, version string, loaderVersion string, memoryMB int) (*db.Server, error) {
@@ -194,6 +209,26 @@ func (a *App) DeleteServer(idStr string) error {
 	return nil
 }
 
+// DeleteServerRecord removes the server from Porque (DB + backups) WITHOUT deleting
+// the server directory from disk. The files stay where they are.
+func (a *App) DeleteServerRecord(idStr string) error {
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		return err
+	}
+	srv, err := a.store.GetServer(a.ctx, id)
+	if err != nil {
+		return err
+	}
+	_ = a.tunnels.Detach(a.ctx, id)
+	if err := a.life.DeleteRecord(a.ctx, id); err != nil {
+		return err
+	}
+	a.backups.PurgeServer(srv.Name)
+	return nil
+}
+
+
 func (a *App) GetServerMetrics(idStr string, limit int) ([]db.ServerMetric, error) {
 	id, err := uuid.Parse(idStr)
 	if err != nil {
@@ -239,15 +274,63 @@ func (a *App) UpdateServerSettings(idStr string, difficulty string, onlineMode b
 }
 
 func (a *App) SelectFolder() (string, error) {
-	return wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+	res, err := wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
 		Title: "Select Minecraft Server Directory",
 	})
+	if err == nil && res != "" {
+		return res, nil
+	}
+
+	if runtime.GOOS == "windows" {
+		wailsRuntime.LogInfof(a.ctx, "Wails OpenDirectoryDialog failed or cancelled: %v. Trying PowerShell fallback...", err)
+		cmdStr := "$app = New-Object -ComObject Shell.Application; " +
+			"$folder = $app.BrowseForFolder(0, 'Select Minecraft Server Directory', 65); " +
+			"if ($folder) { $folder.Self.Path }"
+		cmd := exec.Command("powershell", "-NoProfile", "-Command", cmdStr)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		out, runErr := cmd.Output()
+		if runErr == nil {
+			path := strings.TrimSpace(string(out))
+			if path != "" {
+				return path, nil
+			}
+		} else {
+			wailsRuntime.LogErrorf(a.ctx, "PowerShell folder picker fallback failed: %v", runErr)
+		}
+	}
+
+	return res, err
 }
 
 func (a *App) SelectFile() (string, error) {
-	return wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+	res, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
 		Title: "Select File",
 	})
+	if err == nil && res != "" {
+		return res, nil
+	}
+
+	if runtime.GOOS == "windows" {
+		wailsRuntime.LogInfof(a.ctx, "Wails OpenFileDialog failed or cancelled: %v. Trying PowerShell fallback...", err)
+		cmdStr := "Add-Type -AssemblyName System.Windows.Forms; " +
+			"$f = New-Object System.Windows.Forms.OpenFileDialog; " +
+			"$f.Filter = 'All Files (*.*)|*.*'; " +
+			"$f.Title = 'Select File'; " +
+			"if ($f.ShowDialog() -eq 'OK') { $f.FileName }"
+		cmd := exec.Command("powershell", "-NoProfile", "-Command", cmdStr)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		out, runErr := cmd.Output()
+		if runErr == nil {
+			path := strings.TrimSpace(string(out))
+			if path != "" {
+				return path, nil
+			}
+		} else {
+			wailsRuntime.LogErrorf(a.ctx, "PowerShell file picker fallback failed: %v", runErr)
+		}
+	}
+
+	return res, err
 }
 
 func (a *App) DetectServerDirectory(hostPath string) (map[string]string, error) {
@@ -495,7 +578,7 @@ func (a *App) ListPlayitAccounts() ([]any, error) {
 		if claiming || claimURL != "" {
 			mockAcct := map[string]any{
 				"id":         "00000000-0000-0000-0000-000000000000",
-				"name":       "Bundled Playit Account (linking...)",
+				"name":       "Minecraft (linking...)",
 				"status":     "claiming",
 				"claim_url":  claimURL,
 				"created_at": time.Now().UTC().Format(time.RFC3339),
@@ -532,33 +615,46 @@ func (a *App) ListTunnels() ([]db.ServerTunnel, error) {
 	if err == nil && len(accts) > 0 {
 		playitTunnels, err := a.tunnels.ListTunnelsFromAPI(a.ctx, accts[0].SecretKey)
 		if err == nil {
+			// Build proto→address map and a flat address list for legacy rows.
+			byProto := map[string]string{}
+			var anyAddresses []string
+			for _, pt := range playitTunnels {
+				if pt.PublicAddress == "" {
+					continue
+				}
+				if _, ok := byProto[pt.Proto]; !ok {
+					byProto[pt.Proto] = pt.PublicAddress
+				}
+				anyAddresses = append(anyAddresses, pt.PublicAddress)
+			}
+
 			activeTs, err := a.store.ListActiveTunnels(a.ctx)
 			if err == nil {
 				for _, act := range activeTs {
-					srv, err := a.store.GetServer(a.ctx, act.ServerID)
-					if err == nil {
-						var matched *playit.Tunnel
-						for _, pt := range playitTunnels {
-							if strings.Contains(strings.ToLower(pt.Name), strings.ToLower(srv.Name)) ||
-								strings.Contains(strings.ToLower(srv.Name), strings.ToLower(pt.Name)) {
-								matched = &pt
-								break
-							}
+					if act.PublicAddress != nil && *act.PublicAddress != "" {
+						continue // already has address, skip
+					}
+					var addr string
+					if act.Proto == "" {
+						// Legacy row (AttachTunnel path) — use first available address.
+						if len(anyAddresses) > 0 {
+							addr = anyAddresses[0]
 						}
-						if matched == nil && len(playitTunnels) > 0 {
-							matched = &playitTunnels[0]
-						}
-						if matched != nil {
-							status := db.TunnelConnected
-							_ = a.store.UpdateServerTunnel(a.ctx, act.ID, status, &matched.PublicAddress)
-						}
+					} else if a, ok := byProto[act.Proto]; ok {
+						addr = a
+					}
+					if addr != "" {
+						status := db.TunnelConnected
+						_ = a.store.UpdateServerTunnel(a.ctx, act.ID, status, &addr)
 					}
 				}
 			}
 		}
 	}
+
 	return a.tunnels.ListActive(a.ctx)
 }
+
 
 func (a *App) AttachTunnel(serverIDStr string, accountIDStr string) (*db.ServerTunnel, error) {
 	serverID, err := uuid.Parse(serverIDStr)
@@ -585,6 +681,27 @@ func (a *App) GetTunnelStatus(serverIDStr string) ([]db.ServerTunnel, error) {
 		return []db.ServerTunnel{}, nil
 	}
 	return tunnels, nil
+}
+
+func (a *App) SendServerCommand(serverIDStr string, command string) (string, error) {
+	serverID, err := uuid.Parse(serverIDStr)
+	if err != nil {
+		return "", err
+	}
+	srv, err := a.store.GetServer(a.ctx, serverID)
+	if err != nil {
+		return "", err
+	}
+	if srv.State != db.StateRunning {
+		return "", fmt.Errorf("server is not running")
+	}
+	port := 25575
+	inst, err := a.store.LatestInstance(a.ctx, serverID)
+	if err == nil && inst != nil && inst.RconHostPort != nil {
+		port = *inst.RconHostPort
+	}
+	rc := rcon.New(fmt.Sprintf("127.0.0.1:%d", port), srv.RconPassword)
+	return rc.Run(a.ctx, command)
 }
 
 func (a *App) CreateTunnel(serverIDStr string, kind string) (*db.ServerTunnel, error) {
@@ -682,9 +799,35 @@ func (a *App) StopStreamingLogs(serverIDStr string) {
 	a.activeStreamsMu.Unlock()
 }
 
+func (a *App) GetServerLogs(serverIDStr string) (string, error) {
+	id, err := uuid.Parse(serverIDStr)
+	if err != nil {
+		return "", err
+	}
+	srv, err := a.store.GetServer(a.ctx, id)
+	if err != nil {
+		return "", err
+	}
+	logPath := filepath.Join(srv.VolumeName, "server.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "No log file found.", nil
+		}
+		return "", err
+	}
+	const maxBytes = 500 * 1024
+	if len(data) > maxBytes {
+		return string(data[len(data)-maxBytes:]), nil
+	}
+	return string(data), nil
+}
+
 func (a *App) StartStreamingPlayitLogs(serverIDStr string) {
+	log.Printf("[StartStreamingPlayitLogs] Requested for server ID: %s", serverIDStr)
 	a.activeStreamsMu.Lock()
 	if cancel, exists := a.activeStreams["playit:"+serverIDStr]; exists {
+		log.Printf("[StartStreamingPlayitLogs] Cancelling existing stream for %s", serverIDStr)
 		cancel()
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
@@ -694,25 +837,31 @@ func (a *App) StartStreamingPlayitLogs(serverIDStr string) {
 	go func() {
 		id, err := uuid.Parse(serverIDStr)
 		if err != nil {
+			log.Printf("[StartStreamingPlayitLogs] Failed to parse UUID %s: %v", serverIDStr, err)
 			return
 		}
 		rc, err := a.life.FollowSidecarLogs(ctx, id)
 		if err != nil {
+			log.Printf("[StartStreamingPlayitLogs] FollowSidecarLogs failed for %s: %v", serverIDStr, err)
 			return
 		}
+		log.Printf("[StartStreamingPlayitLogs] FollowSidecarLogs started successfully for %s", serverIDStr)
 		defer rc.Close()
 
 		buf := make([]byte, 2048)
 		for {
 			select {
 			case <-ctx.Done():
+				log.Printf("[StartStreamingPlayitLogs] Context cancelled for %s", serverIDStr)
 				return
 			default:
 				n, err := rc.Read(buf)
 				if n > 0 {
+					log.Printf("[StartStreamingPlayitLogs] Read %d bytes, emitting event logs:playit:%s", n, serverIDStr)
 					wailsRuntime.EventsEmit(a.ctx, "logs:playit:"+serverIDStr, string(buf[:n]))
 				}
 				if err != nil {
+					log.Printf("[StartStreamingPlayitLogs] Read error or EOF for %s: %v", serverIDStr, err)
 					return
 				}
 			}
@@ -802,3 +951,323 @@ func hostRAMBytes() int64 {
 	}
 	return 0
 }
+
+type GeyserMetadata struct {
+	GeyserBuild    int `json:"geyser_build"`
+	FloodgateBuild int `json:"floodgate_build"`
+}
+
+type GeyserBuildResponse struct {
+	Build int `json:"build"`
+}
+
+// CreateJavaAndBedrockTunnels creates both Java (TCP) and Bedrock (UDP) tunnels for the running server.
+func (a *App) CreateJavaAndBedrockTunnels(serverIDStr string) ([]db.ServerTunnel, error) {
+	serverID, err := uuid.Parse(serverIDStr)
+	if err != nil {
+		return nil, err
+	}
+	// Create Java tunnel
+	_, err = a.tunnels.CreateTunnelForServer(a.ctx, serverID, "java")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Java tunnel: %w", err)
+	}
+	// Create Bedrock tunnel
+	_, err = a.tunnels.CreateTunnelForServer(a.ctx, serverID, "bedrock")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Bedrock tunnel: %w", err)
+	}
+	return a.tunnels.Status(a.ctx, serverID)
+}
+
+// GetGeyserStatus gets the current status of Geyser and Floodgate on a server.
+func (a *App) GetGeyserStatus(serverIDStr string) (map[string]any, error) {
+	serverID, err := uuid.Parse(serverIDStr)
+	if err != nil {
+		return nil, err
+	}
+	srv, err := a.store.GetServer(a.ctx, serverID)
+	if err != nil {
+		return nil, err
+	}
+
+	folder, err := a.life.ModsFolder(a.ctx, serverID)
+	if err != nil {
+		return nil, err
+	}
+
+	targetDir := filepath.Join(srv.VolumeName, folder)
+	geyserInstalled := false
+	floodgateInstalled := false
+
+	// Scan folder for jar files
+	entries, _ := os.ReadDir(targetDir)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := strings.ToLower(entry.Name())
+		if strings.HasSuffix(name, ".jar") {
+			if strings.HasPrefix(name, "geyser-") {
+				geyserInstalled = true
+			}
+			if strings.HasPrefix(name, "floodgate-") {
+				floodgateInstalled = true
+			}
+		}
+	}
+
+	// Read metadata file if exists
+	var meta GeyserMetadata
+	metaPath := filepath.Join(srv.VolumeName, "geyser_metadata.json")
+	if content, err := os.ReadFile(metaPath); err == nil {
+		_ = json.Unmarshal(content, &meta)
+	}
+
+	// If the jars are not actually there, reset the metadata version
+	if !geyserInstalled {
+		meta.GeyserBuild = 0
+	}
+	if !floodgateInstalled {
+		meta.FloodgateBuild = 0
+	}
+
+	// Query latest builds from GeyserMC API
+	latestGeyserBuild := 0
+	latestFloodgateBuild := 0
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	if resp, err := client.Get("https://download.geysermc.org/v2/projects/geyser/versions/latest/builds/latest"); err == nil {
+		defer resp.Body.Close()
+		var r GeyserBuildResponse
+		if json.NewDecoder(resp.Body).Decode(&r) == nil {
+			latestGeyserBuild = r.Build
+		}
+	}
+
+	if resp, err := client.Get("https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest"); err == nil {
+		defer resp.Body.Close()
+		var r GeyserBuildResponse
+		if json.NewDecoder(resp.Body).Decode(&r) == nil {
+			latestFloodgateBuild = r.Build
+		}
+	}
+
+	supportsGeyser := srv.ServerType == db.TypePaper || srv.ServerType == db.TypeFabric
+
+	return map[string]any{
+		"geyser_installed":       geyserInstalled,
+		"geyser_build":           meta.GeyserBuild,
+		"floodgate_installed":     floodgateInstalled,
+		"floodgate_build":         meta.FloodgateBuild,
+		"latest_geyser_build":    latestGeyserBuild,
+		"latest_floodgate_build": latestFloodgateBuild,
+		"server_type":            srv.ServerType,
+		"supports_geyser":        supportsGeyser,
+	}, nil
+}
+
+// InstallOrUpdateGeyser downloads the latest Geyser & Floodgate, and configures the port.
+func (a *App) InstallOrUpdateGeyser(serverIDStr string) (map[string]any, error) {
+	serverID, err := uuid.Parse(serverIDStr)
+	if err != nil {
+		return nil, err
+	}
+	srv, err := a.store.GetServer(a.ctx, serverID)
+	if err != nil {
+		return nil, err
+	}
+
+	if srv.ServerType != db.TypePaper && srv.ServerType != db.TypeFabric {
+		return nil, fmt.Errorf("server type %s is not supported by Geyser", srv.ServerType)
+	}
+
+	// Stop server if running
+	if srv.State == db.StateRunning || srv.State == db.StateStarting {
+		_ = a.life.Stop(a.ctx, serverID)
+		// Wait up to 30 seconds for it to be fully stopped
+		for i := 0; i < 30; i++ {
+			s, err := a.store.GetServer(a.ctx, serverID)
+			if err == nil && s.State == db.StateStopped {
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+	}
+
+	folder, err := a.life.ModsFolder(a.ctx, serverID)
+	if err != nil {
+		return nil, err
+	}
+
+	targetDir := filepath.Join(srv.VolumeName, folder)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Clean out old geyser/floodgate jars
+	entries, _ := os.ReadDir(targetDir)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := strings.ToLower(entry.Name())
+		if strings.HasSuffix(name, ".jar") && (strings.HasPrefix(name, "geyser-") || strings.HasPrefix(name, "floodgate-")) {
+			_ = os.Remove(filepath.Join(targetDir, entry.Name()))
+		}
+	}
+
+	platform := "spigot"
+	geyserJarName := "Geyser-Spigot.jar"
+	floodgateJarName := "floodgate-spigot.jar"
+	configPath := filepath.Join(srv.VolumeName, "plugins", "Geyser-Spigot", "config.yml")
+	configDir := filepath.Join(srv.VolumeName, "plugins", "Geyser-Spigot")
+
+	if srv.ServerType == db.TypeFabric {
+		platform = "fabric"
+		geyserJarName = "Geyser-Fabric.jar"
+		floodgateJarName = "floodgate-fabric.jar"
+		configPath = filepath.Join(srv.VolumeName, "config", "Geyser-Fabric", "config.yml")
+		configDir = filepath.Join(srv.VolumeName, "config", "Geyser-Fabric")
+	}
+
+	// Fetch latest build numbers first
+	client := &http.Client{Timeout: 15 * time.Second}
+	var geyserBuild, floodgateBuild int
+
+	if resp, err := client.Get("https://download.geysermc.org/v2/projects/geyser/versions/latest/builds/latest"); err == nil {
+		defer resp.Body.Close()
+		var r GeyserBuildResponse
+		_ = json.NewDecoder(resp.Body).Decode(&r)
+		geyserBuild = r.Build
+	}
+	if resp, err := client.Get("https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest"); err == nil {
+		defer resp.Body.Close()
+		var r GeyserBuildResponse
+		_ = json.NewDecoder(resp.Body).Decode(&r)
+		floodgateBuild = r.Build
+	}
+
+	// Helper to download a URL to dest
+	download := func(url, dest string) error {
+		resp, err := client.Get(url)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("HTTP %s", resp.Status)
+		}
+		out, err := os.Create(dest)
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+		_, err = io.Copy(out, resp.Body)
+		return err
+	}
+
+	// Download Geyser
+	geyserURL := fmt.Sprintf("https://download.geysermc.org/v2/projects/geyser/versions/latest/builds/latest/downloads/%s", platform)
+	if err := download(geyserURL, filepath.Join(targetDir, geyserJarName)); err != nil {
+		return nil, fmt.Errorf("failed to download Geyser: %w", err)
+	}
+
+	// Download Floodgate
+	floodgatePlatform := "spigot"
+	if srv.ServerType == db.TypeFabric {
+		floodgatePlatform = "fabric"
+	}
+	floodgateURL := fmt.Sprintf("https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest/downloads/%s", floodgatePlatform)
+	if err := download(floodgateURL, filepath.Join(targetDir, floodgateJarName)); err != nil {
+		return nil, fmt.Errorf("failed to download Floodgate: %w", err)
+	}
+
+	// Create config dir
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create config dir: %w", err)
+	}
+
+	// Write default config.yml if not exists
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		defaultConfig := `# Geyser Configuration
+bedrock:
+  address: 0.0.0.0
+  port: 19132
+remote:
+  address: 127.0.0.1
+  port: 25565
+  auth-type: floodgate
+`
+		_ = os.WriteFile(configPath, []byte(defaultConfig), 0o644)
+	}
+
+	// Update Geyser config port to match local port
+	_ = updateGeyserConfig(configPath, 19132)
+
+	// Write metadata JSON
+	meta := GeyserMetadata{
+		GeyserBuild:    geyserBuild,
+		FloodgateBuild: floodgateBuild,
+	}
+	metaBytes, _ := json.MarshalIndent(meta, "", "  ")
+	_ = os.WriteFile(filepath.Join(srv.VolumeName, "geyser_metadata.json"), metaBytes, 0o644)
+
+	return map[string]any{
+		"success":         true,
+		"geyser_build":    geyserBuild,
+		"floodgate_build": floodgateBuild,
+	}, nil
+}
+
+func updateGeyserConfig(path string, bedrockPort int) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(content), "\n")
+
+	inBedrockSection := false
+	inRemoteSection := false
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Detect section headers (without indentation)
+		if strings.HasPrefix(line, "bedrock:") {
+			inBedrockSection = true
+			inRemoteSection = false
+			continue
+		}
+		if strings.HasPrefix(line, "remote:") {
+			inRemoteSection = true
+			inBedrockSection = false
+			continue
+		}
+		// If line starts with a non-space, we left the previous section
+		if len(line) > 0 && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			inBedrockSection = false
+			inRemoteSection = false
+		}
+
+		if inBedrockSection {
+			if strings.HasPrefix(trimmed, "port:") {
+				idx := strings.Index(line, "port:")
+				indent := line[:idx]
+				lines[i] = fmt.Sprintf("%sport: %d", indent, bedrockPort)
+			}
+		}
+
+		if inRemoteSection {
+			if strings.HasPrefix(trimmed, "auth-type:") {
+				idx := strings.Index(line, "auth-type:")
+				indent := line[:idx]
+				lines[i] = fmt.Sprintf("%sauth-type: floodgate", indent)
+			}
+		}
+	}
+
+	newContent := strings.Join(lines, "\n")
+	return os.WriteFile(path, []byte(newContent), 0o644)
+}
+

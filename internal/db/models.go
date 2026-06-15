@@ -144,3 +144,12 @@ type ServerInstance struct {
 	StoppedAt    *time.Time `db:"stopped_at"`
 	ExitCode     *int       `db:"exit_code"`
 }
+
+// AppLog represents a system or server event log entry.
+type AppLog struct {
+	ID         string    `db:"id" json:"id"`
+	ServerID   string    `db:"server_id" json:"server_id"`
+	ServerName string    `db:"server_name" json:"server_name"`
+	Message    string    `db:"message" json:"message"`
+	CreatedAt  time.Time `db:"created_at" json:"created_at"`
+}

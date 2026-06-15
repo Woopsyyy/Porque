@@ -88,12 +88,48 @@ type rawRunDataProto struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
 	Proto          string `json:"proto"`
+	PortType       string `json:"port_type"`
+	TunnelType     string `json:"tunnel_type"`
 	LocalPort      int    `json:"local_port"`
 	LocalIP        string `json:"local_ip"`
 	AssignedDomain string `json:"assigned_domain"`
 	Port           struct {
 		From int `json:"from"`
 	} `json:"port"`
+}
+
+// formatPublicAddress builds the public address string for a tunnel.
+// Java (minecraft-java / .joinmc.link) tunnels use SRV records and don't
+// require a port suffix. Bedrock and other tunnel types use host:port.
+// Returns empty string when the domain hasn't been assigned yet.
+func formatPublicAddress(t rawRunDataProto) string {
+	if t.AssignedDomain == "" {
+		return ""
+	}
+	// minecraft-java tunnels use SRV records via joinmc.link – no port needed
+	if t.TunnelType == "minecraft-java" {
+		return t.AssignedDomain
+	}
+	if t.Port.From == 0 {
+		return t.AssignedDomain
+	}
+	return fmt.Sprintf("%s:%d", t.AssignedDomain, t.Port.From)
+}
+
+func effectiveProto(t rawRunDataProto) string {
+	if t.TunnelType == "minecraft-java" {
+		return "tcp"
+	}
+	if t.TunnelType == "minecraft-bedrock" {
+		return "udp"
+	}
+	if t.Proto != "" {
+		return t.Proto
+	}
+	if t.PortType != "" {
+		return t.PortType
+	}
+	return ""
 }
 
 // ListTunnels queries the run data for the agent key.
@@ -137,14 +173,15 @@ func (c *HTTPPlayitClient) ListTunnels(ctx context.Context, secretKey string) ([
 		tunnels = append(tunnels, Tunnel{
 			ID:            t.ID,
 			Name:          t.Name,
-			PublicAddress: fmt.Sprintf("%s:%d", t.AssignedDomain, t.Port.From),
-			Proto:         t.Proto,
+			PublicAddress: formatPublicAddress(t),
+			Proto:         effectiveProto(t),
 			LocalPort:     t.LocalPort,
 			Status:        "connected",
 		})
 	}
 	return tunnels, nil
 }
+
 
 // StartClaim starts the claiming process by submitting a random 5-byte code.
 func (c *HTTPPlayitClient) StartClaim(ctx context.Context) (string, string, error) {
@@ -358,8 +395,8 @@ func (c *HTTPPlayitClient) CreateTunnel(ctx context.Context, secretKey, agentID,
 	return &Tunnel{
 		ID:            t.ID,
 		Name:          t.Name,
-		PublicAddress: fmt.Sprintf("%s:%d", t.AssignedDomain, t.Port.From),
-		Proto:         t.Proto,
+		PublicAddress: formatPublicAddress(t),
+		Proto:         effectiveProto(t),
 		LocalPort:     t.LocalPort,
 		Status:        "connected",
 	}, nil

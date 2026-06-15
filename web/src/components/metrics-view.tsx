@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Cpu, HardDrive, MemoryStick, Users } from "lucide-react";
+import { Activity, Cpu, HardDrive, MemoryStick, Users } from "lucide-react";
 import { api, type Server } from "@/lib/api";
 import { useWebSocket } from "@/lib/ws";
 import { formatBytes } from "@/lib/format";
@@ -13,6 +13,8 @@ interface Point {
   memBytes: number;
   players: number;
   max: number;
+  latency: number;
+  storage: number;
 }
 
 const MAX_POINTS = 120;
@@ -29,14 +31,6 @@ export function MetricsView({ server }: { server: Server }) {
     queryFn: () => api.getMetrics(server.id, MAX_POINTS),
   });
 
-  // Disk usage of the data volume, polled live while running.
-  const { data: storage } = useQuery({
-    queryKey: ["storage", server.id],
-    queryFn: () => api.getStorage(server.id),
-    refetchInterval: running ? 8000 : false,
-    enabled: running,
-  });
-
   useEffect(() => {
     if (!history) return;
     setPoints(
@@ -50,16 +44,20 @@ export function MetricsView({ server }: { server: Server }) {
           memBytes: m.mem_bytes,
           players: m.player_count,
           max: m.max_players,
+          latency: m.latency_ms ?? 0,
+          storage: m.storage_bytes,
         })),
     );
   }, [history, memLimit]);
 
   useWebSocket(running ? `/ws/status/${server.id}` : null, (data) => {
     try {
+      console.log("[MetricsView] Raw metrics event data received:", data);
       const m = JSON.parse(data);
       if (m.type !== "metrics") return;
-      setPoints((prev) =>
-        [
+      console.log("[MetricsView] Appending point:", m);
+      setPoints((prev) => {
+        const next = [
           ...prev,
           {
             time: fmtTime(Date.now()),
@@ -68,11 +66,15 @@ export function MetricsView({ server }: { server: Server }) {
             memBytes: m.mem_bytes,
             players: m.player_count,
             max: m.max_players,
+            latency: m.latency_ms ?? 0,
+            storage: m.storage_bytes ?? 0,
           },
-        ].slice(-MAX_POINTS),
-      );
-    } catch {
-      /* ignore non-JSON frames */
+        ].slice(-MAX_POINTS);
+        console.log("[MetricsView] New points length:", next.length);
+        return next;
+      });
+    } catch (err) {
+      console.error("[MetricsView] Failed to parse/process metrics event:", err);
     }
   });
 
@@ -89,16 +91,16 @@ export function MetricsView({ server }: { server: Server }) {
           sub={`of ${server.memory_mb} MB`}
         />
         <StatCard
+          icon={Activity}
+          label="Latency"
+          value={latest && latest.latency ? `${latest.latency} ms` : "—"}
+          sub="server response"
+        />
+        <StatCard
           icon={Users}
           label="Players"
           value={latest ? `${latest.players}/${latest.max || "—"}` : "—"}
           sub="online now"
-        />
-        <StatCard
-          icon={HardDrive}
-          label="Storage"
-          value={storage?.available ? formatBytes(storage.bytes) : "—"}
-          sub="world + files on disk"
         />
       </div>
 
@@ -108,8 +110,17 @@ export function MetricsView({ server }: { server: Server }) {
         </div>
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
-          <ChartCard title="CPU usage" unit="%" color="#E8B931" dataKey="cpu" data={points} />
-          <ChartCard title="Memory usage" unit="%" color="#5BA8FF" dataKey="memPct" data={points} />
+          <ChartCard title="CPU usage" color="#E8B931" dataKey="cpu" data={points} percent fmt={(v) => `${v}%`} />
+          <ChartCard title="Memory usage" color="#5BA8FF" dataKey="memPct" data={points} percent fmt={(v) => `${v}%`} />
+          <ChartCard title="Latency" color="#34D399" dataKey="latency" data={points} fmt={(v) => `${v} ms`} />
+          <ChartCard
+            title="Storage"
+            color="#C084FC"
+            dataKey="storage"
+            data={points}
+            icon={HardDrive}
+            fmt={(v) => formatBytes(v)}
+          />
         </div>
       )}
     </div>
@@ -141,26 +152,31 @@ function StatCard({
 
 function ChartCard({
   title,
-  unit,
   color,
   dataKey,
   data,
+  fmt,
+  percent = false,
+  icon: Icon,
 }: {
   title: string;
-  unit: string;
   color: string;
-  dataKey: "cpu" | "memPct";
+  dataKey: keyof Point;
   data: Point[];
+  fmt: (v: number) => string;
+  percent?: boolean;
+  icon?: ComponentType<{ className?: string }>;
 }) {
-  const gid = useMemo(() => `grad-${dataKey}`, [dataKey]);
+  const gid = useMemo(() => `grad-${String(dataKey)}`, [dataKey]);
   return (
     <div className="panel p-5">
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-3 flex items-center gap-2">
+        {Icon && <Icon className="h-3.5 w-3.5 text-faint" />}
         <span className="eyebrow">{title}</span>
       </div>
       <div className="h-52">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={data} margin={{ top: 4, right: 6, left: -18, bottom: 0 }}>
+          <AreaChart data={data} margin={{ top: 4, right: 6, left: -6, bottom: 0 }}>
             <defs>
               <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor={color} stopOpacity={0.45} />
@@ -178,9 +194,9 @@ function ChartCard({
               tick={{ fill: "#5c6477", fontSize: 10, fontFamily: "JetBrains Mono" }}
               tickLine={false}
               axisLine={false}
-              width={42}
-              domain={[0, (max: number) => Math.max(100, Math.ceil(max / 20) * 20)]}
-              tickFormatter={(v) => `${v}${unit}`}
+              width={54}
+              domain={percent ? [0, (max: number) => Math.max(100, Math.ceil(max / 20) * 20)] : [0, "auto"]}
+              tickFormatter={(v) => fmt(Number(v))}
             />
             <Tooltip
               cursor={{ stroke: color, strokeOpacity: 0.3 }}
@@ -192,7 +208,7 @@ function ChartCard({
                 fontFamily: "JetBrains Mono",
                 color: "#e6e9ef",
               }}
-              formatter={(v: number) => [`${v}${unit}`, title]}
+              formatter={(v: number) => [fmt(v), title]}
             />
             <Area
               type="monotone"

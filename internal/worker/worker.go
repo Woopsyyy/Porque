@@ -46,25 +46,28 @@ type Worker struct {
 	pub     Publisher
 	cfg     Config
 
-	mu       sync.Mutex
-	restarts map[uuid.UUID][]time.Time
-	misses   map[uuid.UUID]int
-	healing  map[uuid.UUID]bool
+	mu                  sync.Mutex
+	restarts            map[uuid.UUID][]time.Time
+	misses              map[uuid.UUID]int
+	healing             map[uuid.UUID]bool
+	gamerulesConfigured map[uuid.UUID]bool
 }
 
 // New constructs a Worker. backups may be nil (scheduled backups disabled).
 func New(store *db.Store, life *mcserver.Controller, backups *backup.Service, pub Publisher, cfg Config) *Worker {
 	return &Worker{
 		store: store, life: life, backups: backups, pub: pub, cfg: cfg,
-		restarts: map[uuid.UUID][]time.Time{},
-		misses:   map[uuid.UUID]int{},
-		healing:  map[uuid.UUID]bool{},
+		restarts:            map[uuid.UUID][]time.Time{},
+		misses:              map[uuid.UUID]int{},
+		healing:             map[uuid.UUID]bool{},
+		gamerulesConfigured: map[uuid.UUID]bool{},
 	}
 }
 
 // Run starts the heartbeat/metrics scheduler and the backup scheduler, blocking until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) {
 	go w.backupScheduler(ctx)
+	go w.logPruner(ctx)
 
 	t := time.NewTicker(w.cfg.MetricsInterval)
 	defer t.Stop()
@@ -75,6 +78,24 @@ func (w *Worker) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			w.tick(ctx)
+		}
+	}
+}
+
+// logPruner deletes logs older than 24 hours every 5 minutes.
+func (w *Worker) logPruner(ctx context.Context) {
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	// Run once immediately on start
+	_ = w.store.PruneAppLogs(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := w.store.PruneAppLogs(ctx); err != nil {
+				log.Printf("worker: failed to prune expired app logs: %v", err)
+			}
 		}
 	}
 }
@@ -204,6 +225,9 @@ func (w *Worker) sample(ctx context.Context, srv *db.Server) {
 	inGrace := inst.StartedAt != nil && time.Since(*inst.StartedAt) < w.cfg.StartupGrace
 
 	if !running && !inGrace {
+		w.mu.Lock()
+		delete(w.gamerulesConfigured, srv.ID)
+		w.mu.Unlock()
 		w.triggerHeartbeatRecovery(ctx, srv.ID, "process not running")
 		return
 	}
@@ -219,6 +243,22 @@ func (w *Worker) sample(ctx context.Context, srv *db.Server) {
 	if rconErr == nil {
 		players, maxPlayers, _ = rcon.ParsePlayerList(out)
 		*latencyPtr = 10 // reasonable default latency
+
+		// Run gamerules once to disable noisy command feedback in game chat and logs
+		w.mu.Lock()
+		configured := w.gamerulesConfigured[srv.ID]
+		w.mu.Unlock()
+
+		if !configured {
+			log.Printf("worker: configuring gamerules for server %s (disabling command feedback spam)\n", srv.Name)
+			_, _ = rc.Run(ctx, "gamerule sendCommandFeedback false")
+			_, _ = rc.Run(ctx, "gamerule broadcastConsoleToOps false")
+			_, _ = rc.Run(ctx, "gamerule logAdminCommands false")
+
+			w.mu.Lock()
+			w.gamerulesConfigured[srv.ID] = true
+			w.mu.Unlock()
+		}
 	} else if !inGrace {
 		w.mu.Lock()
 		w.misses[srv.ID]++

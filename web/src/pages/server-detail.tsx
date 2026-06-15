@@ -1,20 +1,26 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Play, RotateCw, Square, Trash2 } from "lucide-react";
+import { ArrowLeft, FolderX, Play, RotateCw, Square, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Skeleton, Spinner } from "@/components/ui/misc";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { StateBadge } from "@/components/state-badge";
-import { ConfirmDialog } from "@/components/confirm-dialog";
 import { ConsoleView } from "@/components/console-view";
 import { MetricsView } from "@/components/metrics-view";
 import { BackupsView } from "@/components/backups-view";
-import { TunnelView } from "@/components/tunnel-view";
+import { GeyserView } from "@/components/geyser-view";
 import { SettingsView } from "@/components/settings-view";
 import { ModsView } from "@/components/mods-view";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 const BUSY_STATES = ["starting", "stopping", "creating", "recovering"];
 
@@ -63,15 +69,30 @@ export default function ServerDetailPage() {
     },
     onError: onErr,
   });
-  const remove = useMutation({
-    mutationFn: () => api.deleteServer(serverId),
+
+  const afterDelete = () => {
+    qc.invalidateQueries({ queryKey: ["servers"] });
+    navigate("/");
+  };
+
+  const removeRecord = useMutation({
+    mutationFn: () => api.deleteServerRecord(serverId),
     onSuccess: () => {
-      toast.success("Server deleted");
-      qc.invalidateQueries({ queryKey: ["servers"] });
-      navigate("/");
+      toast.success("Server removed from Porque — files kept on disk");
+      afterDelete();
     },
     onError: onErr,
   });
+  const removeAll = useMutation({
+    mutationFn: () => api.deleteServer(serverId),
+    onSuccess: () => {
+      toast.success("Server and all files permanently deleted");
+      afterDelete();
+    },
+    onError: onErr,
+  });
+
+  const deleting = removeRecord.isPending || removeAll.isPending;
 
   if (isLoading || !server) {
     return (
@@ -153,7 +174,7 @@ export default function ServerDetailPage() {
           <TabsTrigger value="metrics">Metrics</TabsTrigger>
           <TabsTrigger value="mods">Mods</TabsTrigger>
           <TabsTrigger value="backups">Backups</TabsTrigger>
-          <TabsTrigger value="tunnel">Tunnel</TabsTrigger>
+          <TabsTrigger value="geyser">Geyser</TabsTrigger>
           <TabsTrigger value="settings">Settings</TabsTrigger>
         </TabsList>
 
@@ -169,24 +190,88 @@ export default function ServerDetailPage() {
         <TabsContent value="backups">
           <BackupsView server={server} />
         </TabsContent>
-        <TabsContent value="tunnel">
-          <TunnelView server={server} />
+        <TabsContent value="geyser">
+          <GeyserView server={server} />
         </TabsContent>
         <TabsContent value="settings">
           <SettingsView server={server} />
         </TabsContent>
       </Tabs>
 
-      <ConfirmDialog
-        open={confirmDelete}
-        onOpenChange={setConfirmDelete}
-        title={`Delete “${server.name}”?`}
-        description="This permanently removes the container, its data volume, and all backups. This cannot be undone."
-        confirmLabel="Delete server"
-        variant="danger"
-        loading={remove.isPending}
-        onConfirm={() => remove.mutate()}
-      />
+      {/* ─── Two-option delete dialog ─────────────────────────────────── */}
+      <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-danger">
+              <Trash2 className="h-5 w-5" />
+              Delete "{server.name}"?
+            </DialogTitle>
+            <DialogDescription>
+              Choose how you want to remove this server. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="mt-1 flex flex-col gap-3">
+            {/* Option 1 — record only */}
+            <button
+              id="delete-record-only"
+              disabled={deleting}
+              onClick={() => removeRecord.mutate()}
+              className="group flex items-start gap-4 rounded-xl border border-border bg-surface/60 p-4 text-left transition-all hover:border-warn/50 hover:bg-warn/5 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-warn/10 text-warn transition-colors group-hover:bg-warn/20">
+                {removeRecord.isPending ? (
+                  <Spinner className="h-4 w-4" />
+                ) : (
+                  <Trash2 className="h-4 w-4" />
+                )}
+              </div>
+              <div>
+                <p className="font-semibold text-ink">Remove from Porque only</p>
+                <p className="mt-0.5 text-sm text-muted">
+                  Unlinks the server from the dashboard. Your server files at{" "}
+                  <span className="font-mono text-xs text-faint">{server.volume_name}</span>{" "}
+                  are <span className="font-medium text-ink">kept on disk</span>.
+                </p>
+              </div>
+            </button>
+
+            {/* Option 2 — record + files */}
+            <button
+              id="delete-record-and-files"
+              disabled={deleting}
+              onClick={() => removeAll.mutate()}
+              className="group flex items-start gap-4 rounded-xl border border-border bg-surface/60 p-4 text-left transition-all hover:border-danger/50 hover:bg-danger/5 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-danger/10 text-danger transition-colors group-hover:bg-danger/20">
+                {removeAll.isPending ? (
+                  <Spinner className="h-4 w-4" />
+                ) : (
+                  <FolderX className="h-4 w-4" />
+                )}
+              </div>
+              <div>
+                <p className="font-semibold text-danger">Delete from Porque + directory</p>
+                <p className="mt-0.5 text-sm text-muted">
+                  Permanently deletes the server record <span className="font-medium text-ink">and</span>{" "}
+                  all files at{" "}
+                  <span className="font-mono text-xs text-faint">{server.volume_name}</span>.{" "}
+                  <span className="text-danger font-medium">Irreversible.</span>
+                </p>
+              </div>
+            </button>
+
+            <Button
+              variant="ghost"
+              className="mt-1"
+              onClick={() => setConfirmDelete(false)}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

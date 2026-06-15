@@ -158,6 +158,16 @@ func (c *Controller) Start(ctx context.Context, id uuid.UUID) (*db.Server, error
 		return nil, apperr.BadState("server is already running")
 	}
 
+	// Stop any other running/starting server to release ports and prevent conflicts
+	servers, err := c.store.ListServers(ctx)
+	if err == nil {
+		for _, other := range servers {
+			if other.ID != id && (other.State == db.StateRunning || other.State == db.StateStarting || other.State == db.StateStopping) {
+				_ = c.Stop(ctx, other.ID)
+			}
+		}
+	}
+
 	c.transition(ctx, srv, db.StateStarting, "starting")
 
 	// Ensure the server directory exists
@@ -181,6 +191,15 @@ func (c *Controller) Start(ctx context.Context, id uuid.UUID) (*db.Server, error
 	if err := writeServerProperties(srv.VolumeName, srv); err != nil {
 		c.transition(ctx, srv, db.StateCrashed, "properties write failed: "+err.Error())
 		return nil, apperr.Internal(err)
+	}
+
+	// Double check if we were stopped/cancelled during download
+	latest, err := c.store.GetServer(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if latest.State != db.StateStarting {
+		return nil, apperr.BadState("start cancelled: state changed")
 	}
 
 	// Start the local Java process: java -Xms<mem>M -Xmx<mem>M -jar <jarName> nogui
@@ -241,10 +260,21 @@ func (c *Controller) Start(ctx context.Context, id uuid.UUID) (*db.Server, error
 
 		_ = c.store.MarkInstanceStopped(context.Background(), instanceID, &exitCode)
 
-		if exitCode == 0 || exitCode == 130 { // 130 is SIGINT/Ctrl+C
-			c.transition(context.Background(), s, db.StateStopped, "stopped")
+		latest, getErr := c.store.GetServer(context.Background(), s.ID)
+		if getErr == nil && latest.State != db.StateStopping {
+			// Unexpected termination (it exited on its own, not stopped by user)
+			c.transition(context.Background(), latest, db.StateCrashed, fmt.Sprintf("unexpected shutdown: process exited on its own (code %d)", exitCode))
 		} else {
-			c.transition(context.Background(), s, db.StateCrashed, fmt.Sprintf("exited with code %d", exitCode))
+			// Normal shutdown or error loading state (fallback to exitCode check)
+			srvObj := s
+			if getErr == nil {
+				srvObj = latest
+			}
+			if exitCode == 0 || exitCode == 130 { // 130 is SIGINT/Ctrl+C
+				c.transition(context.Background(), srvObj, db.StateStopped, "stopped")
+			} else {
+				c.transition(context.Background(), srvObj, db.StateCrashed, fmt.Sprintf("exited with code %d", exitCode))
+			}
 		}
 	}(srv, inst.ID)
 
@@ -263,6 +293,11 @@ func (c *Controller) Stop(ctx context.Context, id uuid.UUID) error {
 		return err
 	}
 	if inst == nil || inst.ContainerID == nil || *inst.ContainerID == "" {
+		if srv.State == db.StateStarting || srv.State == db.StateStopping {
+			c.transition(ctx, srv, db.StateStopped, "stopped")
+			_ = c.store.DeactivateServerTunnels(ctx, id)
+			return nil
+		}
 		return apperr.BadState("server has no running process")
 	}
 
@@ -296,6 +331,21 @@ func (c *Controller) Stop(ctx context.Context, id uuid.UUID) error {
 		}
 	}
 
+	// Stop playit agent if active
+	if t, _ := c.store.ActiveServerTunnel(ctx, id); t != nil {
+		if t.SidecarContainerID != nil && *t.SidecarContainerID != "" {
+			spid, err := strconv.Atoi(*t.SidecarContainerID)
+			if err == nil {
+				sp, err := os.FindProcess(spid)
+				if err == nil {
+					_ = sp.Kill()
+					_, _ = sp.Wait()
+				}
+			}
+		}
+	}
+	_ = c.store.DeactivateServerTunnels(ctx, id)
+
 	// Exit code is nil on manual stops
 	_ = c.store.MarkInstanceStopped(ctx, inst.ID, nil)
 	c.transition(ctx, srv, db.StateStopped, "stopped")
@@ -325,6 +375,22 @@ func (c *Controller) EnsureStopped(ctx context.Context, id uuid.UUID) error {
 			_ = c.store.MarkInstanceStopped(ctx, inst.ID, nil)
 		}
 	}
+
+	// Stop playit agent if active
+	if t, _ := c.store.ActiveServerTunnel(ctx, id); t != nil {
+		if t.SidecarContainerID != nil && *t.SidecarContainerID != "" {
+			spid, err := strconv.Atoi(*t.SidecarContainerID)
+			if err == nil && isProcessAlive(spid) {
+				sp, err := os.FindProcess(spid)
+				if err == nil {
+					_ = sp.Kill()
+					_, _ = sp.Wait()
+				}
+			}
+		}
+	}
+	_ = c.store.DeactivateServerTunnels(ctx, id)
+
 	if srv.State != db.StateStopped {
 		c.transition(ctx, srv, db.StateStopped, "stopped for restore")
 	}
@@ -341,7 +407,7 @@ func (c *Controller) Restart(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
-// Delete stops/removes the process and server directory, then deletes the server record.
+// Delete stops the server process, removes its directory from disk, and deletes the record.
 func (c *Controller) Delete(ctx context.Context, id uuid.UUID) error {
 	srv, err := c.store.GetServer(ctx, id)
 	if err != nil {
@@ -349,10 +415,21 @@ func (c *Controller) Delete(ctx context.Context, id uuid.UUID) error {
 	}
 	_ = c.EnsureStopped(ctx, id)
 
-	// Remove server folder
+	// Remove server folder from disk
 	_ = os.RemoveAll(srv.VolumeName)
 
 	return c.store.DeleteServer(ctx, srv.ID)
+}
+
+// DeleteRecord stops the server process and removes only the database record,
+// leaving the server directory on disk untouched.
+func (c *Controller) DeleteRecord(ctx context.Context, id uuid.UUID) error {
+	_, err := c.store.GetServer(ctx, id)
+	if err != nil {
+		return err
+	}
+	_ = c.EnsureStopped(ctx, id)
+	return c.store.DeleteServer(ctx, id)
 }
 
 // Storage returns the on-disk size (bytes) of the server's directory read natively.
@@ -379,7 +456,7 @@ func (c *Controller) FollowSidecarLogs(ctx context.Context, id uuid.UUID) (io.Re
 	if err != nil {
 		return nil, err
 	}
-	if t == nil || t.SidecarContainerID == nil || *t.SidecarContainerID == "" {
+	if t == nil {
 		return nil, apperr.BadState("no active tunnel")
 	}
 	logPath := filepath.Join(srv.VolumeName, "playit.log")
@@ -401,6 +478,11 @@ func (c *Controller) transition(ctx context.Context, srv *db.Server, to db.Serve
 	from := srv.State
 	_ = c.store.UpdateServerState(ctx, srv.ID, to)
 	_ = c.store.InsertStateEvent(ctx, srv.ID, from, to, message)
+	
+	if to == db.StateCrashed {
+		_ = c.store.AddAppLog(ctx, srv.ID, srv.Name, fmt.Sprintf("Server crashed: %s", message))
+	}
+
 	srv.State = to
 	c.pub.PublishStatus(srv.ID.String(), map[string]any{
 		"server_id": srv.ID.String(),

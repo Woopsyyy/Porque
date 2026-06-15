@@ -7,9 +7,9 @@ export function stripAnsi(input: string): string {
   return input.replace(ANSI_RE, "");
 }
 
-// Split a raw log chunk into clean, non-empty lines.
+// Split a raw log chunk into clean, non-empty lines, filtering out RCON connection spam.
 export function toLines(chunk: string): string[] {
   return stripAnsi(chunk)
     .split(/\r?\n/)
-    .filter((l) => l.length > 0);
+    .filter((l) => l.length > 0 && !l.includes("[RCON Listener") && !l.includes("[RCON Client"));
 }

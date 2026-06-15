@@ -50,6 +50,7 @@ func writeServerProperties(dir string, srv *db.Server) error {
 	}
 	props["difficulty"] = srv.Difficulty
 	props["motd"] = srv.MOTD
+	props["broadcast-rcon-to-ops"] = "false"
 
 	// Write properties back
 	file, err := os.Create(path)

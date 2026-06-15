@@ -152,4 +152,14 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Crash/system event logs.
+CREATE TABLE IF NOT EXISTS app_logs (
+    id          TEXT PRIMARY KEY,
+    server_id   TEXT REFERENCES servers(id) ON DELETE CASCADE,
+    server_name TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_app_logs_created ON app_logs(created_at DESC);
 `

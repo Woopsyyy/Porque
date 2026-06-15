@@ -6,6 +6,8 @@ export function AttachTunnel(arg1:string,arg2:string):Promise<db.ServerTunnel>;
 
 export function CreateBackup(arg1:string):Promise<db.Backup>;
 
+export function CreateJavaAndBedrockTunnels(arg1:string):Promise<Array<db.ServerTunnel>>;
+
 export function CreatePlayitAccount(arg1:string,arg2:string):Promise<db.PlayitAccount>;
 
 export function CreateServer(arg1:string,arg2:string,arg3:string,arg4:string,arg5:number):Promise<db.Server>;
@@ -18,13 +20,19 @@ export function DeletePlayitAccount(arg1:string):Promise<void>;
 
 export function DeleteServer(arg1:string):Promise<void>;
 
+export function DeleteServerRecord(arg1:string):Promise<void>;
+
 export function DetachTunnel(arg1:string,arg2:string):Promise<void>;
 
 export function DetectServerDirectory(arg1:string):Promise<Record<string, string>>;
 
+export function GetGeyserStatus(arg1:string):Promise<Record<string, any>>;
+
 export function GetServer(arg1:string):Promise<db.Server>;
 
 export function GetServerIcon(arg1:string):Promise<string>;
+
+export function GetServerLogs(arg1:string):Promise<string>;
 
 export function GetServerMetrics(arg1:string,arg2:number):Promise<Array<db.ServerMetric>>;
 
@@ -41,6 +49,10 @@ export function ImportServerFromPath(arg1:string,arg2:string,arg3:string,arg4:st
 export function ImportServerFromZip(arg1:string,arg2:string,arg3:string,arg4:string,arg5:number,arg6:string):Promise<db.Server>;
 
 export function InstallMods(arg1:string,arg2:Array<string>):Promise<void>;
+
+export function InstallOrUpdateGeyser(arg1:string):Promise<Record<string, any>>;
+
+export function ListAppLogs():Promise<Array<db.AppLog>>;
 
 export function ListBackups(arg1:string):Promise<Array<db.Backup>>;
 
@@ -63,6 +75,8 @@ export function RestoreBackup(arg1:string):Promise<Record<string, string>>;
 export function SelectFile():Promise<string>;
 
 export function SelectFolder():Promise<string>;
+
+export function SendServerCommand(arg1:string,arg2:string):Promise<string>;
 
 export function Show():Promise<void>;
 

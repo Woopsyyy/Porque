@@ -245,10 +245,10 @@ func (s *Store) CreateServerTunnel(ctx context.Context, t *ServerTunnel) error {
 	t.ID = uuid.New()
 	err := s.db.QueryRowxContext(ctx,
 		`INSERT INTO server_tunnels
-		   (id, server_id, playit_account_id, sidecar_container_id, public_address, status, active)
-		 VALUES (?,?,?,?,?,?,?)
+		   (id, server_id, playit_account_id, sidecar_container_id, public_address, proto, status, active)
+		 VALUES (?,?,?,?,?,?,?,?)
 		 RETURNING created_at`,
-		t.ID, t.ServerID, t.PlayitAccountID, t.SidecarContainerID, t.PublicAddress, t.Status, t.Active,
+		t.ID, t.ServerID, t.PlayitAccountID, t.SidecarContainerID, t.PublicAddress, t.Proto, t.Status, t.Active,
 	).Scan(&t.CreatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -294,10 +294,21 @@ func (s *Store) UpdateServerTunnel(ctx context.Context, id uuid.UUID, status Tun
 	return nil
 }
 
-// DeactivateServerTunnels marks a server's tunnels inactive (on detach).
+// UpdateServerTunnelsPID sets the sidecar PID for all active tunnels of a server.
+func (s *Store) UpdateServerTunnelsPID(ctx context.Context, serverID uuid.UUID, pid string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE server_tunnels SET sidecar_container_id = ? WHERE server_id = ? AND active`,
+		pid, serverID)
+	if err != nil {
+		return apperr.Internal(err)
+	}
+	return nil
+}
+
+// DeactivateServerTunnels deletes a server's tunnels (on detach).
 func (s *Store) DeactivateServerTunnels(ctx context.Context, serverID uuid.UUID) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE server_tunnels SET active = 0, status = 'disconnected' WHERE server_id = ? AND active`, serverID)
+		`DELETE FROM server_tunnels WHERE server_id = ?`, serverID)
 	if err != nil {
 		return apperr.Internal(err)
 	}
@@ -328,10 +339,10 @@ func (s *Store) ActiveTunnelByProto(ctx context.Context, serverID uuid.UUID, pro
 	return &t, nil
 }
 
-// DeactivateServerTunnelByProto deactivates a specific protocol's tunnel for a server.
+// DeactivateServerTunnelByProto deletes a specific protocol's tunnel for a server.
 func (s *Store) DeactivateServerTunnelByProto(ctx context.Context, serverID uuid.UUID, proto string) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE server_tunnels SET active = 0, status = 'disconnected' WHERE server_id = ? AND proto = ? AND active`, serverID, proto)
+		`DELETE FROM server_tunnels WHERE server_id = ? AND proto = ?`, serverID, proto)
 	if err != nil {
 		return apperr.Internal(err)
 	}
@@ -564,6 +575,37 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO settings (key, value) VALUES (?, ?)
 		 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, key, value)
+	if err != nil {
+		return apperr.Internal(err)
+	}
+	return nil
+}
+
+// AddAppLog records a server or system event log entry.
+func (s *Store) AddAppLog(ctx context.Context, serverID uuid.UUID, serverName, message string) error {
+	id := uuid.New().String()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO app_logs (id, server_id, server_name, message) VALUES (?, ?, ?, ?)`,
+		id, serverID.String(), serverName, message,
+	)
+	if err != nil {
+		return apperr.Internal(err)
+	}
+	return nil
+}
+
+// ListAppLogs returns all log entries ordered newest first.
+func (s *Store) ListAppLogs(ctx context.Context) ([]AppLog, error) {
+	var out []AppLog
+	if err := s.db.SelectContext(ctx, &out, `SELECT * FROM app_logs ORDER BY created_at DESC`); err != nil {
+		return nil, apperr.Internal(err)
+	}
+	return out, nil
+}
+
+// PruneAppLogs deletes any logs created more than 24 hours ago.
+func (s *Store) PruneAppLogs(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM app_logs WHERE created_at < datetime('now', '-24 hours')`)
 	if err != nil {
 		return apperr.Internal(err)
 	}

@@ -1,0 +1,9 @@
+{
+  "name": "porque-root",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "push": "node scripts/push.js",
+    "bundle": "node scripts/bundle.js"
+  }
+}

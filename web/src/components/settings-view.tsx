@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ImagePlus, Save } from "lucide-react";
 import { toast } from "sonner";
@@ -183,36 +183,39 @@ export function SettingsView({ server }: { server: Server }) {
 }
 
 function IconCard({ server }: { server: Server }) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [version, setVersion] = useState(0);
-  const [hasIcon, setHasIcon] = useState(true);
+  const qc = useQueryClient();
+
+  const { data: icon } = useQuery({
+    queryKey: ["icon", server.id],
+    queryFn: () => api.getIcon(server.id).catch(() => null),
+    retry: false,
+  });
 
   const upload = useMutation({
-    mutationFn: (file: File) => api.uploadIcon(server.id, file),
-    onSuccess: () => {
+    mutationFn: async () => {
+      const path = await api.selectFile();
+      if (!path) return false;
+      await api.uploadIconPath(server.id, path);
+      return true;
+    },
+    onSuccess: (changed) => {
+      if (!changed) return;
       toast.success("Server icon updated");
-      setHasIcon(true);
-      setVersion((v) => v + 1);
+      qc.invalidateQueries({ queryKey: ["icon", server.id] });
     },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : "Icon upload failed"),
   });
 
-  const pick = (files: FileList | null) => {
-    const f = files?.[0];
-    if (f) upload.mutate(f);
-  };
-
   return (
     <div className="panel flex items-center gap-5 p-6">
       <div className="grid h-16 w-16 shrink-0 place-items-center overflow-hidden rounded-md border border-border bg-bg/60">
-        {hasIcon ? (
+        {icon ? (
           <img
-            src={`${api.iconUrl(server.id)}?v=${version}`}
+            src={icon}
             alt="Server icon"
             width={64}
             height={64}
             className="h-16 w-16 [image-rendering:pixelated]"
-            onError={() => setHasIcon(false)}
           />
         ) : (
           <ImagePlus className="h-6 w-6 text-faint" />
@@ -224,21 +227,11 @@ function IconCard({ server }: { server: Server }) {
           Any image — auto-cropped &amp; resized to a crisp 64×64 PNG. Restart to show it in the
           server list.
         </p>
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/*"
-          className="hidden"
-          onChange={(e) => {
-            pick(e.target.files);
-            e.target.value = "";
-          }}
-        />
         <Button
           variant="outline"
           size="sm"
           className="mt-3"
-          onClick={() => inputRef.current?.click()}
+          onClick={() => upload.mutate()}
           disabled={upload.isPending}
         >
           {upload.isPending ? <Spinner className="h-4 w-4" /> : <ImagePlus className="h-4 w-4" />}

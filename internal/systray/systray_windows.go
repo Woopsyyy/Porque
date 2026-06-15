@@ -35,7 +35,7 @@ var (
 
 	mu             sync.Mutex
 	activeServerID string
-	slotServerIDs  [10]string
+	slotServerIDs  []string
 )
 
 // Start initializes the system tray menu.
@@ -73,26 +73,10 @@ func onReady() {
 	mStop = systray.AddMenuItem("Stop Server", "Stop the active server")
 	mRestart = systray.AddMenuItem("Restart Server", "Restart the active server")
 
-	// Change Server submenu
+	// Change Server submenu. Slots are created lazily as the server count grows
+	// (see ensureChangeSlots), so there is no hardcoded cap on the number of
+	// servers shown here.
 	mChange = systray.AddMenuItem("Change Server", "Select the active server to manage")
-	changeSlots = make([]*systray.MenuItem, 10)
-	for i := 0; i < 10; i++ {
-		slotItem := mChange.AddSubMenuItem(fmt.Sprintf("Slot %d", i), "")
-		changeSlots[i] = slotItem
-		slotItem.Hide()
-
-		// Wire up the click callback for the slot
-		idx := i
-		slotItem.Click(func() {
-			mu.Lock()
-			targetID := slotServerIDs[idx]
-			if targetID != "" {
-				activeServerID = targetID
-			}
-			mu.Unlock()
-			updateTrayMenu()
-		})
-	}
 
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Exit the application")
@@ -246,8 +230,9 @@ func updateTrayMenu() {
 		mRestart.Disable()
 	}
 
-	// 4. Update Change Server Submenu Slots
-	for i := 0; i < 10; i++ {
+	// 4. Update Change Server Submenu Slots (grow on demand, no fixed cap).
+	ensureChangeSlots(len(servers))
+	for i := range changeSlots {
 		if i < len(servers) {
 			srv := servers[i]
 			slotServerIDs[i] = srv.ID.String()
@@ -264,6 +249,31 @@ func updateTrayMenu() {
 			slotServerIDs[i] = ""
 			changeSlots[i].Hide()
 		}
+	}
+}
+
+// ensureChangeSlots lazily creates enough "Change Server" submenu items to show
+// n servers. Items are only ever added (the tray library has no remove), so the
+// slice grows to the high-water mark of server count. Callers must hold mu.
+func ensureChangeSlots(n int) {
+	for len(changeSlots) < n {
+		idx := len(changeSlots)
+		slotItem := mChange.AddSubMenuItem(fmt.Sprintf("Slot %d", idx), "")
+		slotItem.Hide()
+		slotItem.Click(func() {
+			mu.Lock()
+			var targetID string
+			if idx < len(slotServerIDs) {
+				targetID = slotServerIDs[idx]
+			}
+			if targetID != "" {
+				activeServerID = targetID
+			}
+			mu.Unlock()
+			updateTrayMenu()
+		})
+		changeSlots = append(changeSlots, slotItem)
+		slotServerIDs = append(slotServerIDs, "")
 	}
 }
 

@@ -16,8 +16,13 @@ import (
 //go:embed all:web/dist
 var assets embed.FS
 
+// version is the application version, injected at release build time via
+// -ldflags "-X main.version=<tag>". Stays "dev" for local/dev builds, which
+// disables the GitHub auto-update check.
+var version = "dev"
+
 func main() {
-	app := NewApp()
+	app := NewApp(version)
 
 	// Detect --minimized launch argument
 	startHidden := false

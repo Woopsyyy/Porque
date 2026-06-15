@@ -13,6 +13,13 @@ CREATE TABLE IF NOT EXISTS servers (
     cpu_cores      REAL NOT NULL DEFAULT 1.0 CHECK (cpu_cores > 0),
     rcon_password  TEXT NOT NULL,                       -- generated server-side, never logged
     volume_name    TEXT NOT NULL,                       -- path where server files live
+    port           INTEGER NOT NULL DEFAULT 25565,      -- allocated game port (stable per server)
+    rcon_port      INTEGER NOT NULL DEFAULT 25575,      -- allocated RCON port (stable per server)
+    maintenance_mode    BOOLEAN NOT NULL DEFAULT 0,     -- whitelist-only maintenance active
+    maintenance_start   DATETIME,                       -- scheduled maintenance window start
+    maintenance_end     DATETIME,                       -- scheduled maintenance window end
+    maintenance_reason  TEXT,                            -- message shown / used to kick players
+    maintenance_backup  BOOLEAN NOT NULL DEFAULT 0,      -- back up before entering a scheduled window
     state          TEXT NOT NULL DEFAULT 'creating'
                    CHECK (state IN ('creating','starting','running','stopping','stopped',
                                     'crashed','recovering','corrupted','unknown')),
@@ -21,6 +28,8 @@ CREATE TABLE IF NOT EXISTS servers (
     motd           TEXT NOT NULL DEFAULT 'A Minecraft Server',
     backup_enabled          BOOLEAN NOT NULL DEFAULT 0,
     backup_interval_minutes INTEGER NOT NULL DEFAULT 360,
+    backup_interval_value   INTEGER NOT NULL DEFAULT 6,
+    backup_interval_unit    TEXT NOT NULL DEFAULT 'hour',
     backup_keep             INTEGER NOT NULL DEFAULT 5,
     backup_last_run         DATETIME,
     created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

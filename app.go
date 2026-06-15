@@ -31,6 +31,7 @@ import (
 	"github.com/woopsy/porque/internal/playit"
 	"github.com/woopsy/porque/internal/rcon"
 	"github.com/woopsy/porque/internal/systray"
+	"github.com/woopsy/porque/internal/updater"
 	"github.com/woopsy/porque/internal/worker"
 )
 
@@ -45,14 +46,20 @@ type App struct {
 	worker  *worker.Worker
 	backups *backup.Service
 
+	version string
+
 	activeStreams   map[string]context.CancelFunc
 	activeStreamsMu sync.Mutex
 
 	allowClose bool
 }
 
-func NewApp() *App {
+func NewApp(version string) *App {
+	if version == "" {
+		version = "dev"
+	}
 	return &App{
+		version:       version,
 		activeStreams: make(map[string]context.CancelFunc),
 	}
 }
@@ -112,6 +119,7 @@ func (a *App) startup(ctx context.Context) {
 	a.life = mcserver.NewController(a.store, pub)
 	a.tunnels = playit.NewManager(a.store, playit.NewHTTPClient(), pub, appDir)
 	a.backups = backup.NewService(a.store, a.life, appDir, 5)
+	a.life.SetBackupService(a.backups)
 
 	wConfig := worker.Config{
 		MetricsInterval: 10 * time.Second,
@@ -126,6 +134,88 @@ func (a *App) startup(ctx context.Context) {
 
 	// Start Windows system tray icon
 	systray.Start(mascotBytes, a.Show, a.Quit, a)
+
+	// Check GitHub for a newer release and self-update in the background.
+	go a.autoUpdate()
+}
+
+// autoUpdate checks GitHub Releases on startup and, if a newer version exists,
+// downloads it and swaps the running binary in place. It never blocks startup
+// and is skipped for dev builds.
+func (a *App) autoUpdate() {
+	if a.version == "dev" {
+		return
+	}
+	ctx := context.Background()
+	rel, err := updater.Latest(ctx)
+	if err != nil {
+		wailsRuntime.LogInfof(a.ctx, "update check failed: %v", err)
+		return
+	}
+	if !updater.IsNewer(rel.TagName, a.version) {
+		return
+	}
+
+	wailsRuntime.EventsEmit(a.ctx, "update:available", map[string]string{"version": rel.TagName})
+	if err := updater.DownloadAndApply(ctx, rel); err != nil {
+		wailsRuntime.LogErrorf(a.ctx, "auto-update failed: %v", err)
+		wailsRuntime.EventsEmit(a.ctx, "update:failed", map[string]string{
+			"version": rel.TagName,
+			"url":     rel.HTMLURL,
+		})
+		return
+	}
+	wailsRuntime.EventsEmit(a.ctx, "update:ready", map[string]string{"version": rel.TagName})
+}
+
+// GetAppVersion returns the running application version.
+func (a *App) GetAppVersion() string {
+	return a.version
+}
+
+// CheckForUpdates manually checks for a newer release (for a Settings button).
+func (a *App) CheckForUpdates() (map[string]any, error) {
+	rel, err := updater.Latest(a.ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"current":   a.version,
+		"latest":    rel.TagName,
+		"available": a.version != "dev" && updater.IsNewer(rel.TagName, a.version),
+		"url":       rel.HTMLURL,
+	}, nil
+}
+
+// ApplyUpdate downloads and applies the latest release on demand.
+func (a *App) ApplyUpdate() error {
+	rel, err := updater.Latest(a.ctx)
+	if err != nil {
+		return err
+	}
+	if !updater.IsNewer(rel.TagName, a.version) {
+		return fmt.Errorf("already up to date")
+	}
+	if err := updater.DownloadAndApply(a.ctx, rel); err != nil {
+		return err
+	}
+	wailsRuntime.EventsEmit(a.ctx, "update:ready", map[string]string{"version": rel.TagName})
+	return nil
+}
+
+// RestartApp relaunches the (now-updated) executable and exits the current one.
+func (a *App) RestartApp() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(exe, os.Args[1:]...)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Hard-exit so the close-to-tray handler doesn't keep us alive.
+	os.Exit(0)
+	return nil
 }
 
 func (a *App) GetSystemInfo() map[string]any {
@@ -273,64 +363,32 @@ func (a *App) UpdateServerSettings(idStr string, difficulty string, onlineMode b
 	return a.store.GetServer(a.ctx, id)
 }
 
+// SelectFolder opens the OS-native directory picker via the Wails runtime. An
+// empty result with no error means the user cancelled. We intentionally do NOT
+// shell out to PowerShell here — the old COM/WinForms fallback tripped Windows
+// Defender and execution-policy warnings.
 func (a *App) SelectFolder() (string, error) {
 	res, err := wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
 		Title: "Select Minecraft Server Directory",
 	})
-	if err == nil && res != "" {
-		return res, nil
+	if err != nil {
+		wailsRuntime.LogErrorf(a.ctx, "OpenDirectoryDialog failed: %v", err)
+		return "", err
 	}
-
-	if runtime.GOOS == "windows" {
-		wailsRuntime.LogInfof(a.ctx, "Wails OpenDirectoryDialog failed or cancelled: %v. Trying PowerShell fallback...", err)
-		cmdStr := "$app = New-Object -ComObject Shell.Application; " +
-			"$folder = $app.BrowseForFolder(0, 'Select Minecraft Server Directory', 65); " +
-			"if ($folder) { $folder.Self.Path }"
-		cmd := exec.Command("powershell", "-NoProfile", "-Command", cmdStr)
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		out, runErr := cmd.Output()
-		if runErr == nil {
-			path := strings.TrimSpace(string(out))
-			if path != "" {
-				return path, nil
-			}
-		} else {
-			wailsRuntime.LogErrorf(a.ctx, "PowerShell folder picker fallback failed: %v", runErr)
-		}
-	}
-
-	return res, err
+	return res, nil
 }
 
+// SelectFile opens the OS-native file picker via the Wails runtime. An empty
+// result with no error means the user cancelled.
 func (a *App) SelectFile() (string, error) {
 	res, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
 		Title: "Select File",
 	})
-	if err == nil && res != "" {
-		return res, nil
+	if err != nil {
+		wailsRuntime.LogErrorf(a.ctx, "OpenFileDialog failed: %v", err)
+		return "", err
 	}
-
-	if runtime.GOOS == "windows" {
-		wailsRuntime.LogInfof(a.ctx, "Wails OpenFileDialog failed or cancelled: %v. Trying PowerShell fallback...", err)
-		cmdStr := "Add-Type -AssemblyName System.Windows.Forms; " +
-			"$f = New-Object System.Windows.Forms.OpenFileDialog; " +
-			"$f.Filter = 'All Files (*.*)|*.*'; " +
-			"$f.Title = 'Select File'; " +
-			"if ($f.ShowDialog() -eq 'OK') { $f.FileName }"
-		cmd := exec.Command("powershell", "-NoProfile", "-Command", cmdStr)
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		out, runErr := cmd.Output()
-		if runErr == nil {
-			path := strings.TrimSpace(string(out))
-			if path != "" {
-				return path, nil
-			}
-		} else {
-			wailsRuntime.LogErrorf(a.ctx, "PowerShell file picker fallback failed: %v", runErr)
-		}
-	}
-
-	return res, err
+	return res, nil
 }
 
 func (a *App) DetectServerDirectory(hostPath string) (map[string]string, error) {
@@ -414,7 +472,36 @@ func (a *App) CreateBackup(serverID string) (*db.Backup, error) {
 	if err != nil {
 		return nil, err
 	}
-	return a.backups.Create(a.ctx, id)
+	srv, err := a.store.GetServer(a.ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	wasRunning := srv.State == db.StateRunning || srv.State == db.StateStarting
+
+	if wasRunning {
+		// Stop the server
+		if err := a.life.Stop(a.ctx, id); err != nil {
+			return nil, fmt.Errorf("failed to stop server before backup: %w", err)
+		}
+	}
+
+	b, err := a.backups.Create(a.ctx, id)
+	if err != nil {
+		if wasRunning {
+			_, _ = a.life.Start(a.ctx, id)
+		}
+		return nil, err
+	}
+
+	if wasRunning {
+		// Restart the server
+		if _, err := a.life.Start(a.ctx, id); err != nil {
+			return b, fmt.Errorf("backup completed but failed to restart server: %w", err)
+		}
+	}
+
+	return b, nil
 }
 
 func (a *App) RestoreBackup(backupIDStr string) (map[string]string, error) {
@@ -432,18 +519,32 @@ func (a *App) RestoreBackup(backupIDStr string) (map[string]string, error) {
 	return map[string]string{"status": "restored", "state": "stopped"}, nil
 }
 
-func (a *App) UpdateBackupSchedule(serverID string, enabled bool, intervalMinutes int, keep int) (*db.Server, error) {
+// DeleteBackup removes a backup's archive file and record.
+func (a *App) DeleteBackup(backupIDStr string) error {
+	backupID, err := uuid.Parse(backupIDStr)
+	if err != nil {
+		return err
+	}
+	return a.backups.Delete(a.ctx, backupID)
+}
+
+func (a *App) UpdateBackupSchedule(serverID string, enabled bool, intervalValue int, intervalUnit string, keep int) (*db.Server, error) {
 	id, err := uuid.Parse(serverID)
 	if err != nil {
 		return nil, err
 	}
-	if intervalMinutes < 5 {
-		intervalMinutes = 360
+	if intervalValue < 1 {
+		intervalValue = 1
+	}
+	switch intervalUnit {
+	case "hour", "week", "month":
+	default:
+		intervalUnit = "hour"
 	}
 	if keep < 1 {
 		keep = 5
 	}
-	if err := a.store.UpdateBackupSchedule(a.ctx, id, enabled, intervalMinutes, keep); err != nil {
+	if err := a.store.UpdateBackupSchedule(a.ctx, id, enabled, intervalValue, intervalUnit, keep); err != nil {
 		return nil, err
 	}
 	return a.store.GetServer(a.ctx, id)
@@ -543,13 +644,9 @@ func (a *App) InstallMods(serverID string, filePaths []string) error {
 	}
 	var files []mcserver.ModFile
 	for _, fp := range filePaths {
-		data, err := os.ReadFile(fp)
-		if err != nil {
-			continue
-		}
 		files = append(files, mcserver.ModFile{
 			Name: filepath.Base(fp),
-			Data: data,
+			Path: fp,
 		})
 	}
 	return a.life.UploadMods(a.ctx, id, files)
@@ -562,6 +659,68 @@ func (a *App) DeleteMod(serverID string, name string) error {
 	}
 	return a.life.DeleteMod(a.ctx, id, name)
 }
+
+// ListOnlinePlayers returns the players currently connected to a running server.
+func (a *App) ListOnlinePlayers(serverID string) ([]mcserver.Player, error) {
+	id, err := uuid.Parse(serverID)
+	if err != nil {
+		return nil, err
+	}
+	return a.life.ListOnlinePlayers(a.ctx, id)
+}
+
+// GetWhitelist returns the server's whitelisted players.
+func (a *App) GetWhitelist(serverID string) ([]mcserver.Player, error) {
+	id, err := uuid.Parse(serverID)
+	if err != nil {
+		return nil, err
+	}
+	return a.life.GetWhitelist(a.ctx, id)
+}
+
+// AddToWhitelist whitelists a player (Java or Bedrock auto-detected).
+func (a *App) AddToWhitelist(serverID, name string) error {
+	id, err := uuid.Parse(serverID)
+	if err != nil {
+		return err
+	}
+	return a.life.AddToWhitelist(a.ctx, id, name)
+}
+
+// RemoveFromWhitelist removes a player from the whitelist.
+func (a *App) RemoveFromWhitelist(serverID, name string) error {
+	id, err := uuid.Parse(serverID)
+	if err != nil {
+		return err
+	}
+	return a.life.RemoveFromWhitelist(a.ctx, id, name)
+}
+
+// GetServerRuntime reports how long the current server process has been running
+// (distinct from the application's own uptime). Returns running=false and no
+// timestamps when the server is not currently running.
+func (a *App) GetServerRuntime(serverID string) (map[string]any, error) {
+	id, err := uuid.Parse(serverID)
+	if err != nil {
+		return nil, err
+	}
+	srv, err := a.store.GetServer(a.ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	res := map[string]any{"running": srv.State == db.StateRunning}
+	if srv.State != db.StateRunning {
+		return res, nil
+	}
+	inst, err := a.store.LatestInstance(a.ctx, id)
+	if err == nil && inst != nil && inst.StartedAt != nil && inst.StoppedAt == nil {
+		res["started_at"] = inst.StartedAt.UTC().Format(time.RFC3339)
+		res["uptime_seconds"] = int(time.Since(*inst.StartedAt).Seconds())
+	}
+	return res, nil
+}
+
+
 
 func (a *App) CreatePlayitAccount(name, secretKey string) (*db.PlayitAccount, error) {
 	return a.store.CreatePlayitAccount(a.ctx, name, secretKey)
@@ -695,7 +854,10 @@ func (a *App) SendServerCommand(serverIDStr string, command string) (string, err
 	if srv.State != db.StateRunning {
 		return "", fmt.Errorf("server is not running")
 	}
-	port := 25575
+	port := srv.RconPort
+	if port == 0 {
+		port = 25575
+	}
 	inst, err := a.store.LatestInstance(a.ctx, serverID)
 	if err == nil && inst != nil && inst.RconHostPort != nil {
 		port = *inst.RconHostPort
@@ -1189,21 +1351,25 @@ func (a *App) InstallOrUpdateGeyser(serverIDStr string) (map[string]any, error) 
 	}
 
 	// Write default config.yml if not exists
+	gamePort := srv.Port
+	if gamePort == 0 {
+		gamePort = 25565
+	}
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		defaultConfig := `# Geyser Configuration
+		defaultConfig := fmt.Sprintf(`# Geyser Configuration
 bedrock:
   address: 0.0.0.0
   port: 19132
 remote:
   address: 127.0.0.1
-  port: 25565
+  port: %d
   auth-type: floodgate
-`
+`, gamePort)
 		_ = os.WriteFile(configPath, []byte(defaultConfig), 0o644)
 	}
 
-	// Update Geyser config port to match local port
-	_ = updateGeyserConfig(configPath, 19132)
+	// Update Geyser config so the bedrock listener and the remote (Java) port match this server.
+	_ = updateGeyserConfig(configPath, 19132, gamePort)
 
 	// Write metadata JSON
 	meta := GeyserMetadata{
@@ -1220,7 +1386,7 @@ remote:
 	}, nil
 }
 
-func updateGeyserConfig(path string, bedrockPort int) error {
+func updateGeyserConfig(path string, bedrockPort, remotePort int) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -1263,6 +1429,11 @@ func updateGeyserConfig(path string, bedrockPort int) error {
 				idx := strings.Index(line, "auth-type:")
 				indent := line[:idx]
 				lines[i] = fmt.Sprintf("%sauth-type: floodgate", indent)
+			}
+			if strings.HasPrefix(trimmed, "port:") {
+				idx := strings.Index(line, "port:")
+				indent := line[:idx]
+				lines[i] = fmt.Sprintf("%sport: %d", indent, remotePort)
 			}
 		}
 	}

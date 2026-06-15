@@ -77,7 +77,9 @@ export function ServerCard({ server }: { server: Server }) {
             <StateBadge state={server.state} />
           </div>
 
-          <h3 className="mt-3 font-display text-xl font-bold tracking-tight text-ink">{server.name}</h3>
+          <h3 className="mt-3 font-display text-xl font-bold tracking-tight text-ink">
+            {server.name}
+          </h3>
 
           <div className="mt-4 flex items-center gap-4 font-mono text-xs text-muted">
             <span className="inline-flex items-center gap-1.5">

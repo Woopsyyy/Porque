@@ -52,13 +52,8 @@ func (s *Service) Create(ctx context.Context, serverID uuid.UUID) (*db.Backup, e
 	if err != nil {
 		return nil, err
 	}
-	inst, err := s.store.LatestInstance(ctx, serverID)
-	if err != nil {
-		return nil, err
-	}
-	if srv.State != db.StateRunning || inst == nil || inst.ContainerID == nil {
-		return nil, apperr.BadState("server must be running to take a zero-downtime backup")
-	}
+
+	isOffline := srv.State != db.StateRunning
 
 	dir := filepath.Join(s.root, slugify(srv.Name))
 	serversPath, errSrv := s.store.GetSetting(ctx, "servers_path")
@@ -72,24 +67,57 @@ func (s *Service) Create(ctx context.Context, serverID uuid.UUID) (*db.Backup, e
 	}
 	path := filepath.Join(dir, time.Now().UTC().Format("20060102T150405Z")+".tar.gz")
 
-	// Freeze saves, flush to disk, and guarantee re-enable on every exit path.
-	// RCON is hosted locally on loopback port 25575.
-	rc := rcon.New("127.0.0.1:25575", srv.RconPassword)
-	if err := rc.SaveOff(ctx); err != nil {
-		return nil, apperr.Internal(fmt.Errorf("RCON save-off failed: %w", err))
-	}
-	defer func() { _ = rc.SaveOn(ctx) }()
-	if err := rc.SaveAll(ctx); err != nil {
-		return nil, apperr.Internal(fmt.Errorf("RCON save-all failed: %w", err))
-	}
+	var sha string
+	if isOffline {
+		// Offline backup: directly compress the server volume
+		var err error
+		sha, err = createArchiveFromDir(srv.VolumeName, path)
+		if err != nil {
+			_ = os.Remove(path)
+			return nil, apperr.Internal(fmt.Errorf("failed to create backup archive: %w", err))
+		}
+	} else {
+		// Online/hot backup: zero-downtime backup with RCON
+		inst, err := s.store.LatestInstance(ctx, serverID)
+		if err != nil {
+			return nil, err
+		}
+		if inst == nil || inst.ContainerID == nil {
+			return nil, apperr.BadState("server must be running to take a zero-downtime backup")
+		}
 
-	// Wait 1 second for the server to perform the saves asynchronously on disk
-	time.Sleep(1 * time.Second)
+		rc := rcon.New(fmt.Sprintf("127.0.0.1:%d", srv.RconPort), srv.RconPassword)
+		if err := rc.SaveOff(ctx); err != nil {
+			return nil, apperr.Internal(fmt.Errorf("RCON save-off failed: %w", err))
+		}
+		savedOn := false
+		defer func() {
+			if !savedOn {
+				_ = rc.SaveOn(ctx)
+			}
+		}()
+		if err := rc.SaveAll(ctx); err != nil {
+			return nil, apperr.Internal(fmt.Errorf("RCON save-all failed: %w", err))
+		}
 
-	sha, err := createArchiveFromDir(srv.VolumeName, path)
-	if err != nil {
-		_ = os.Remove(path)
-		return nil, apperr.Internal(fmt.Errorf("failed to create backup archive: %w", err))
+		time.Sleep(1 * time.Second)
+
+		tempDir := srv.VolumeName + "_bak_tmp"
+		_ = os.RemoveAll(tempDir)
+		defer os.RemoveAll(tempDir)
+		if err := copyDirFiltered(srv.VolumeName, tempDir); err != nil {
+			return nil, apperr.Internal(fmt.Errorf("failed to snapshot world: %w", err))
+		}
+
+		_ = rc.SaveOn(ctx)
+		savedOn = true
+
+		var archErr error
+		sha, archErr = createArchiveFromDir(tempDir, path)
+		if archErr != nil {
+			_ = os.Remove(path)
+			return nil, apperr.Internal(fmt.Errorf("failed to create backup archive: %w", archErr))
+		}
 	}
 
 	info, err := os.Stat(path)
@@ -150,20 +178,69 @@ func (s *Service) Restore(ctx context.Context, serverID, backupID uuid.UUID) err
 		return err
 	}
 
-	// Wipe existing volume contents so stale files don't survive the restore.
-	entries, err := os.ReadDir(srv.VolumeName)
-	if err == nil {
-		for _, entry := range entries {
-			_ = os.RemoveAll(filepath.Join(srv.VolumeName, entry.Name()))
-		}
+	oldDir := srv.VolumeName + "_old"
+	_ = os.RemoveAll(oldDir) // clear any leftover from a previous crashed restore
+
+	// If the backup archive lives inside the server directory, it moves with the
+	// rename below — track its new location and preserve the backups folder.
+	archiveSource := b.FilePath
+	backupsInside := false
+	if rel, relErr := filepath.Rel(srv.VolumeName, b.FilePath); relErr == nil && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel) {
+		backupsInside = true
+		archiveSource = filepath.Join(oldDir, rel)
 	}
 
-	// Extract the archive back to the server directory natively
-	if err := extractArchiveToDir(b.FilePath, srv.VolumeName); err != nil {
+	// Move the current server directory aside instead of wiping it, so we can
+	// roll back if extraction fails partway (full disk, locked file, etc.).
+	if err := os.Rename(srv.VolumeName, oldDir); err != nil {
+		if !os.IsNotExist(err) {
+			return apperr.Internal(fmt.Errorf("failed to set aside current server dir: %w", err))
+		}
+		// Nothing to set aside — extract fresh from the original archive path.
+		if mkErr := os.MkdirAll(srv.VolumeName, 0o755); mkErr != nil {
+			return apperr.Internal(mkErr)
+		}
+		if exErr := extractArchiveToDir(b.FilePath, srv.VolumeName); exErr != nil {
+			return apperr.Internal(fmt.Errorf("failed to extract backup archive: %w", exErr))
+		}
+		return nil
+	}
+
+	if err := os.MkdirAll(srv.VolumeName, 0o755); err != nil {
+		_ = os.Rename(oldDir, srv.VolumeName) // roll back
+		return apperr.Internal(err)
+	}
+
+	if err := extractArchiveToDir(archiveSource, srv.VolumeName); err != nil {
+		// Roll back to the original state.
+		_ = os.RemoveAll(srv.VolumeName)
+		_ = os.Rename(oldDir, srv.VolumeName)
 		return apperr.Internal(fmt.Errorf("failed to extract backup archive: %w", err))
 	}
 
+	// Preserve other backups stored inside the server directory.
+	if backupsInside {
+		oldBackups := filepath.Join(oldDir, "backups")
+		if _, statErr := os.Stat(oldBackups); statErr == nil {
+			_ = os.RemoveAll(filepath.Join(srv.VolumeName, "backups"))
+			_ = os.Rename(oldBackups, filepath.Join(srv.VolumeName, "backups"))
+		}
+	}
+
+	_ = os.RemoveAll(oldDir)
 	return nil
+}
+
+// Delete removes a single backup's archive file from disk and its DB row.
+func (s *Service) Delete(ctx context.Context, backupID uuid.UUID) error {
+	b, err := s.store.GetBackup(ctx, backupID)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(b.FilePath); err != nil && !os.IsNotExist(err) {
+		return apperr.Internal(err)
+	}
+	return s.store.DeleteBackup(ctx, backupID)
 }
 
 // PurgeServer removes all backup archives for a server from disk. Backup DB

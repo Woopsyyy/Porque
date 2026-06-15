@@ -80,11 +80,11 @@ func (s *Store) CreateServer(ctx context.Context, srv *Server) error {
 	err := s.db.QueryRowxContext(ctx,
 		`INSERT INTO servers
 		   (id, name, server_type, version, loader_version, image, memory_mb, cpu_cores,
-		    rcon_password, volume_name, state)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?)
+		    rcon_password, volume_name, port, rcon_port, state)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 RETURNING created_at, updated_at`,
 		srv.ID, srv.Name, srv.ServerType, srv.Version, srv.LoaderVersion, srv.Image,
-		srv.MemoryMB, srv.CPUCores, srv.RconPassword, srv.VolumeName, srv.State,
+		srv.MemoryMB, srv.CPUCores, srv.RconPassword, srv.VolumeName, srv.Port, srv.RconPort, srv.State,
 	).Scan(&srv.CreatedAt, &srv.UpdatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -115,6 +115,27 @@ func (s *Store) ListServers(ctx context.Context) ([]Server, error) {
 		return nil, apperr.Internal(err)
 	}
 	return out, nil
+}
+
+// UsedPorts returns the set of game and RCON ports already reserved by servers.
+func (s *Store) UsedPorts(ctx context.Context) (map[int]bool, error) {
+	rows := []struct {
+		Port     int `db:"port"`
+		RconPort int `db:"rcon_port"`
+	}{}
+	if err := s.db.SelectContext(ctx, &rows, `SELECT port, rcon_port FROM servers`); err != nil {
+		return nil, apperr.Internal(err)
+	}
+	used := make(map[int]bool, len(rows)*2)
+	for _, r := range rows {
+		if r.Port > 0 {
+			used[r.Port] = true
+		}
+		if r.RconPort > 0 {
+			used[r.RconPort] = true
+		}
+	}
+	return used, nil
 }
 
 // UpdateServerState transitions a server's state and bumps updated_at.
@@ -479,10 +500,6 @@ func (s *Store) DueBackups(ctx context.Context) ([]Server, error) {
 		SELECT * FROM servers
 		WHERE backup_enabled = 1
 		  AND state = 'running'
-		  AND (
-		      backup_last_run IS NULL
-		      OR datetime(backup_last_run, '+' || backup_interval_minutes || ' minutes') <= datetime('now')
-		  )
 	`
 	if err := s.db.SelectContext(ctx, &out, query); err != nil {
 		return nil, apperr.Internal(err)
@@ -532,11 +549,11 @@ func (s *Store) UpdateServerConfig(ctx context.Context, id uuid.UUID, difficulty
 }
 
 // UpdateBackupSchedule updates the backup configuration for a server.
-func (s *Store) UpdateBackupSchedule(ctx context.Context, id uuid.UUID, enabled bool, intervalMinutes int, keep int) error {
+func (s *Store) UpdateBackupSchedule(ctx context.Context, id uuid.UUID, enabled bool, intervalValue int, intervalUnit string, keep int) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE servers
-		 SET backup_enabled = ?, backup_interval_minutes = ?, backup_keep = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE id = ?`, enabled, intervalMinutes, keep, id)
+		 SET backup_enabled = ?, backup_interval_value = ?, backup_interval_unit = ?, backup_keep = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`, enabled, intervalValue, intervalUnit, keep, id)
 	if err != nil {
 		return apperr.Internal(err)
 	}

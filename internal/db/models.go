@@ -54,14 +54,23 @@ type Server struct {
 	CPUCores      float64     `db:"cpu_cores" json:"cpu_cores"`
 	RconPassword  string      `db:"rcon_password" json:"-"`
 	VolumeName    string      `db:"volume_name" json:"volume_name"`
+	Port          int         `db:"port" json:"port"`
+	RconPort      int         `db:"rcon_port" json:"rcon_port"`
 	State         ServerState `db:"state" json:"state"`
 	Difficulty    string      `db:"difficulty" json:"difficulty"`
 	OnlineMode    bool        `db:"online_mode" json:"online_mode"`
 	MOTD          string      `db:"motd" json:"motd"`
 	BackupEnabled         bool       `db:"backup_enabled" json:"backup_enabled"`
-	BackupIntervalMinutes int        `db:"backup_interval_minutes" json:"backup_interval_minutes"`
+	BackupIntervalValue   int        `db:"backup_interval_value" json:"backup_interval_value"`
+	BackupIntervalUnit    string     `db:"backup_interval_unit" json:"backup_interval_unit"`
 	BackupKeep            int        `db:"backup_keep" json:"backup_keep"`
 	BackupLastRun         *time.Time `db:"backup_last_run" json:"backup_last_run"`
+	MaintenanceMode       bool       `db:"maintenance_mode" json:"-"`
+	MaintenanceStart      *time.Time `db:"maintenance_start" json:"-"`
+	MaintenanceEnd        *time.Time `db:"maintenance_end" json:"-"`
+	MaintenanceReason     *string    `db:"maintenance_reason" json:"-"`
+	MaintenanceBackup     bool       `db:"maintenance_backup" json:"-"`
+	BackupIntervalMinutes int        `db:"backup_interval_minutes" json:"-"`
 	CreatedAt     time.Time   `db:"created_at" json:"created_at"`
 	UpdatedAt     time.Time   `db:"updated_at" json:"updated_at"`
 }

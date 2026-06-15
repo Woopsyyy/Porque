@@ -2,6 +2,7 @@ package mcserver
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,10 +13,11 @@ import (
 	"github.com/woopsy/porque/internal/db"
 )
 
-// ModFile is an uploaded mod/plugin jar.
+// ModFile is an uploaded mod/plugin jar, referenced by its source path on disk
+// so it can be streamed into place rather than buffered in memory.
 type ModFile struct {
-	Name string
-	Data []byte
+	Name string // destination filename
+	Path string // source path on disk
 }
 
 // ModInfo describes an installed mod/plugin file.
@@ -61,7 +63,7 @@ func (c *Controller) UploadMods(ctx context.Context, serverID uuid.UUID, files [
 		if name == "" || !strings.HasSuffix(strings.ToLower(name), ".jar") {
 			continue
 		}
-		if err := os.WriteFile(filepath.Join(targetDir, name), f.Data, 0o644); err != nil {
+		if err := copyModFile(f.Path, filepath.Join(targetDir, name)); err != nil {
 			return apperr.Internal(err)
 		}
 		wrote++
@@ -72,6 +74,24 @@ func (c *Controller) UploadMods(ctx context.Context, serverID uuid.UUID, files [
 	}
 
 	return nil
+}
+
+// copyModFile streams a jar from src to dst without buffering it in memory.
+func copyModFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // ListMods lists the jar files installed in the server's mods/plugins folder.

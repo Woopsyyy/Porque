@@ -47,6 +47,11 @@ func createArchiveFromDir(srcDir, dstPath string) (sha string, err error) {
 			return nil
 		}
 
+		// Skip session.lock files which are exclusively locked by the running Minecraft server on Windows
+		if info.Name() == "session.lock" {
+			return nil
+		}
+
 		rel = strings.ReplaceAll(rel, "\\", "/")
 
 		header, hdrErr := tar.FileInfoHeader(info, info.Name())
@@ -87,6 +92,63 @@ func createArchiveFromDir(srcDir, dstPath string) (sha string, err error) {
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// copyDirFiltered recursively copies srcDir into dstDir, applying the same
+// exclusions as the archiver (the backups/ subtree and session.lock files).
+// It is used to take a fast, point-in-time snapshot of a world while saving is
+// frozen, so saving can be re-enabled before the slow compression step.
+func copyDirFiltered(srcDir, dstDir string) error {
+	return filepath.Walk(srcDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return os.MkdirAll(dstDir, 0o755)
+		}
+		if rel == "backups" || strings.HasPrefix(rel, "backups/") || strings.HasPrefix(rel, "backups\\") {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.Name() == "session.lock" {
+			return nil
+		}
+
+		target := filepath.Join(dstDir, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !info.Mode().IsRegular() {
+			return nil // skip symlinks / special files
+		}
+		return copyFile(path, target, info.Mode())
+	})
+}
+
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", src, err)
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // extractArchiveToDir decompresses and extracts the .tar.gz back to destDir, stripping "data/" prefix.

@@ -19,6 +19,7 @@ import (
 
 	"github.com/woopsy/porque/internal/apperr"
 	"github.com/woopsy/porque/internal/db"
+	"github.com/woopsy/porque/internal/winproc"
 )
 
 // StatusPublisher fans out tunnel status changes (ws.Hub satisfies it).
@@ -275,6 +276,9 @@ func (m *Manager) Attach(ctx context.Context, serverID, accountID uuid.UUID) (*d
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
 	}
+
+	// Run the playit agent without a console window.
+	winproc.Hide(cmd)
 
 	if err := cmd.Start(); err != nil {
 		if logFile != nil {
@@ -615,6 +619,9 @@ func (m *Manager) ensureSidecar(ctx context.Context, srv *db.Server, account *db
 		cmd.Stderr = logFile
 	}
 
+	// Run the playit agent without a console window.
+	winproc.Hide(cmd)
+
 	if err := cmd.Start(); err != nil {
 		if logFile != nil {
 			logFile.Close()
@@ -637,14 +644,20 @@ func (m *Manager) ensureSidecar(ctx context.Context, srv *db.Server, account *db
 // CreateTunnelForServer creates (or replaces) a server's Playit tunnel for the
 // given kind: "java" => TCP/25565, "bedrock" => UDP/19132 (Geyser).
 func (m *Manager) CreateTunnelForServer(ctx context.Context, serverID uuid.UUID, kind string) (*db.ServerTunnel, error) {
-	proto, localPort := "tcp", 25565
-	if kind == "bedrock" {
-		proto, localPort = "udp", 19132
-	}
-
 	srv, err := m.store.GetServer(ctx, serverID)
 	if err != nil {
 		return nil, err
+	}
+
+	// Java tunnels forward to the server's allocated game port; bedrock tunnels
+	// forward to the Geyser UDP listener.
+	gamePort := srv.Port
+	if gamePort == 0 {
+		gamePort = 25565
+	}
+	proto, localPort := "tcp", gamePort
+	if kind == "bedrock" {
+		proto, localPort = "udp", 19132
 	}
 	inst, err := m.store.LatestInstance(ctx, serverID)
 	if err != nil {

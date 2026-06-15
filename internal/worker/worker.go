@@ -64,10 +64,10 @@ func New(store *db.Store, life *mcserver.Controller, backups *backup.Service, pu
 	}
 }
 
-// Run starts the heartbeat/metrics scheduler and the backup scheduler, blocking until ctx is cancelled.
+// Run starts the heartbeat/metrics scheduler, blocking until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) {
-	go w.backupScheduler(ctx)
 	go w.logPruner(ctx)
+	go w.backupScheduler(ctx)
 
 	t := time.NewTicker(w.cfg.MetricsInterval)
 	defer t.Stop()
@@ -118,6 +118,9 @@ func (w *Worker) backupScheduler(ctx context.Context) {
 			}
 			for i := range due {
 				srv := due[i]
+				if !isBackupDue(&srv) {
+					continue
+				}
 				if _, err := w.backups.Create(ctx, srv.ID); err != nil {
 					log.Printf("worker: scheduled backup for %s failed: %v", srv.Name, err)
 					continue
@@ -126,6 +129,28 @@ func (w *Worker) backupScheduler(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func isBackupDue(srv *db.Server) bool {
+	if srv.BackupLastRun == nil {
+		return true
+	}
+	var nextRun time.Time
+	val := srv.BackupIntervalValue
+	if val <= 0 {
+		val = 1
+	}
+	switch srv.BackupIntervalUnit {
+	case "hour":
+		nextRun = srv.BackupLastRun.Add(time.Duration(val) * time.Hour)
+	case "week":
+		nextRun = srv.BackupLastRun.Add(time.Duration(val) * 7 * 24 * time.Hour)
+	case "month":
+		nextRun = srv.BackupLastRun.AddDate(0, val, 0)
+	default:
+		nextRun = srv.BackupLastRun.Add(time.Duration(val) * time.Hour)
+	}
+	return time.Now().After(nextRun)
 }
 
 func (w *Worker) doRecover(ctx context.Context, id uuid.UUID, eventType, details string) {
@@ -233,7 +258,7 @@ func (w *Worker) sample(ctx context.Context, srv *db.Server) {
 	}
 
 	// Health check via RCON list players
-	rc := rcon.New("127.0.0.1:25575", srv.RconPassword)
+	rc := rcon.New(fmt.Sprintf("127.0.0.1:%d", srv.RconPort), srv.RconPassword)
 	players, maxPlayers := 0, 0
 	latencyVal := 0
 	latencyPtr := &latencyVal

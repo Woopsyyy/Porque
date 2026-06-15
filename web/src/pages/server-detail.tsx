@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { StateBadge } from "@/components/state-badge";
 import { ConsoleView } from "@/components/console-view";
 import { MetricsView } from "@/components/metrics-view";
+import { PlayersView } from "@/components/players-view";
 import { BackupsView } from "@/components/backups-view";
 import { GeyserView } from "@/components/geyser-view";
 import { SettingsView } from "@/components/settings-view";
@@ -123,7 +124,7 @@ export default function ServerDetailPage() {
             {server.server_type} · {server.version}
             {server.loader_version ? ` · ${server.loader_version}` : ""}
           </span>
-          <div className="mt-1.5 flex items-center gap-3">
+          <div className="mt-1.5 flex flex-wrap items-center gap-3">
             <h1 className="font-display text-3xl font-extrabold tracking-tight text-ink">
               {server.name}
             </h1>
@@ -172,6 +173,7 @@ export default function ServerDetailPage() {
         <TabsList>
           <TabsTrigger value="console">Console</TabsTrigger>
           <TabsTrigger value="metrics">Metrics</TabsTrigger>
+          <TabsTrigger value="players">Players</TabsTrigger>
           <TabsTrigger value="mods">Mods</TabsTrigger>
           <TabsTrigger value="backups">Backups</TabsTrigger>
           <TabsTrigger value="geyser">Geyser</TabsTrigger>
@@ -183,6 +185,9 @@ export default function ServerDetailPage() {
         </TabsContent>
         <TabsContent value="metrics">
           <MetricsView server={server} />
+        </TabsContent>
+        <TabsContent value="players">
+          <PlayersView server={server} />
         </TabsContent>
         <TabsContent value="mods">
           <ModsView server={server} />

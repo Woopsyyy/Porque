@@ -21,11 +21,17 @@ import (
 	"github.com/woopsy/porque/internal/apperr"
 	"github.com/woopsy/porque/internal/db"
 	"github.com/woopsy/porque/internal/rcon"
+	"github.com/woopsy/porque/internal/winproc"
 )
 
 // StatusPublisher receives lifecycle state changes for real-time fan-out.
 type StatusPublisher interface {
 	PublishStatus(serverID string, payload any)
+}
+
+// BackupCreator defines the subset of the backup service needed by the controller.
+type BackupCreator interface {
+	Create(ctx context.Context, serverID uuid.UUID) (*db.Backup, error)
 }
 
 // nopPublisher is the default when no hub is wired.
@@ -35,8 +41,9 @@ func (nopPublisher) PublishStatus(string, any) {}
 
 // Controller drives server lifecycle, persisting state and broadcasting changes.
 type Controller struct {
-	store *db.Store
-	pub   StatusPublisher
+	store   *db.Store
+	pub     StatusPublisher
+	backups BackupCreator
 }
 
 // NewController wires a lifecycle controller. pub may be nil.
@@ -45,6 +52,11 @@ func NewController(store *db.Store, pub StatusPublisher) *Controller {
 		pub = nopPublisher{}
 	}
 	return &Controller{store: store, pub: pub}
+}
+
+// SetBackupService wires the backup service after circular initialization in App is resolved.
+func (c *Controller) SetBackupService(b BackupCreator) {
+	c.backups = b
 }
 
 // CreateParams are the user-supplied inputs to create a server.
@@ -103,6 +115,17 @@ func (c *Controller) Create(ctx context.Context, p CreateParams) (*db.Server, er
 		return nil, apperr.Internal(err)
 	}
 
+	// Allocate a stable, collision-free (game, RCON) port pair for this server
+	// so multiple servers can run concurrently without a force-stop dance.
+	used, err := c.store.UsedPorts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	gamePort, rconPort, err := AllocatePorts(used)
+	if err != nil {
+		return nil, apperr.Internal(err)
+	}
+
 	// Determine local directory path
 	var volName string
 	serversPath, errSrv := c.store.GetSetting(ctx, "servers_path")
@@ -127,6 +150,8 @@ func (c *Controller) Create(ctx context.Context, p CreateParams) (*db.Server, er
 		CPUCores:     1.0,
 		RconPassword: rconPw,
 		VolumeName:   volName,
+		Port:         gamePort,
+		RconPort:     rconPort,
 		State:        db.StateCreating,
 	}
 	if p.LoaderVersion != "" {
@@ -158,15 +183,15 @@ func (c *Controller) Start(ctx context.Context, id uuid.UUID) (*db.Server, error
 		return nil, apperr.BadState("server is already running")
 	}
 
-	// Stop any other running/starting server to release ports and prevent conflicts
-	servers, err := c.store.ListServers(ctx)
-	if err == nil {
-		for _, other := range servers {
-			if other.ID != id && (other.State == db.StateRunning || other.State == db.StateStarting || other.State == db.StateStopping) {
-				_ = c.Stop(ctx, other.ID)
-			}
-		}
+	// Fail fast with a friendly message if the installed Java can't run this
+	// Minecraft version, instead of spawning java and crash-looping.
+	if err := checkJavaForVersion(srv.Version); err != nil {
+		c.transition(ctx, srv, db.StateStopped, err.Error())
+		return nil, apperr.BadState(err.Error())
 	}
+
+	// Each server has its own allocated game + RCON ports, so multiple servers
+	// can run concurrently — no need to force-stop other servers here.
 
 	c.transition(ctx, srv, db.StateStarting, "starting")
 
@@ -176,10 +201,15 @@ func (c *Controller) Start(ctx context.Context, id uuid.UUID) (*db.Server, error
 		return nil, apperr.Internal(err)
 	}
 
-	// Download server jar if not present
-	jarName, err := downloadServerJar(srv.VolumeName, string(srv.ServerType), srv.Version)
+	// Download/install the server files and resolve the launch arguments for the
+	// selected loader (Vanilla/Paper/Fabric/Forge).
+	loaderVer := ""
+	if srv.LoaderVersion != nil {
+		loaderVer = *srv.LoaderVersion
+	}
+	launchArgs, err := prepareServerLaunch(srv.VolumeName, string(srv.ServerType), srv.Version, loaderVer)
 	if err != nil {
-		c.transition(ctx, srv, db.StateCrashed, "jar download failed: "+err.Error())
+		c.transition(ctx, srv, db.StateCrashed, "server prepare failed: "+err.Error())
 		return nil, apperr.Internal(err)
 	}
 
@@ -202,13 +232,12 @@ func (c *Controller) Start(ctx context.Context, id uuid.UUID) (*db.Server, error
 		return nil, apperr.BadState("start cancelled: state changed")
 	}
 
-	// Start the local Java process: java -Xms<mem>M -Xmx<mem>M -jar <jarName> nogui
-	cmd := exec.Command("java",
+	// Start the local Java process: java -Xms<mem>M -Xmx<mem>M <launchArgs...>
+	javaArgs := append([]string{
 		fmt.Sprintf("-Xms%dM", srv.MemoryMB),
 		fmt.Sprintf("-Xmx%dM", srv.MemoryMB),
-		"-jar", jarName,
-		"nogui",
-	)
+	}, launchArgs...)
+	cmd := exec.Command("java", javaArgs...)
 	cmd.Dir = srv.VolumeName
 
 	// Open or create log file
@@ -219,6 +248,9 @@ func (c *Controller) Start(ctx context.Context, id uuid.UUID) (*db.Server, error
 	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+
+	// Prevent a console window from popping up for the java child process.
+	winproc.Hide(cmd)
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
@@ -231,8 +263,8 @@ func (c *Controller) Start(ctx context.Context, id uuid.UUID) (*db.Server, error
 
 	pidStr := strconv.Itoa(cmd.Process.Pid)
 	now := time.Now()
-	mcPort := 25565
-	rconPort := 25575
+	mcPort := gamePortOf(srv)
+	rconPort := rconPortOf(srv)
 
 	inst := &db.ServerInstance{
 		ServerID:     srv.ID,
@@ -310,7 +342,7 @@ func (c *Controller) Stop(ctx context.Context, id uuid.UUID) error {
 
 	// Try graceful stop via RCON first
 	stoppedGracefully := false
-	rc := rcon.New("127.0.0.1:25575", srv.RconPassword)
+	rc := rcon.New(rconAddrOf(srv), srv.RconPassword)
 	if _, err := rc.Run(ctx, "stop"); err == nil {
 		// Wait for process to exit up to 30 seconds
 		for i := 0; i < 60; i++ {
@@ -361,7 +393,7 @@ func (c *Controller) EnsureStopped(ctx context.Context, id uuid.UUID) error {
 	if inst, _ := c.store.LatestInstance(ctx, srv.ID); inst != nil && inst.ContainerID != nil && *inst.ContainerID != "" {
 		pid, err := strconv.Atoi(*inst.ContainerID)
 		if err == nil && isProcessAlive(pid) {
-			rc := rcon.New("127.0.0.1:25575", srv.RconPassword)
+			rc := rcon.New(rconAddrOf(srv), srv.RconPassword)
 			_, _ = rc.Run(ctx, "stop")
 			time.Sleep(2 * time.Second)
 

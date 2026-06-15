@@ -40,17 +40,17 @@ func writeServerProperties(dir string, srv *db.Server) error {
 
 	// Override critical keys managed by Porque
 	props["enable-rcon"] = "true"
-	props["rcon.port"] = "25575"
+	props["rcon.port"] = fmt.Sprintf("%d", rconPortOf(srv))
 	props["rcon.password"] = srv.RconPassword
-	props["server-port"] = "25565"
+	props["server-port"] = fmt.Sprintf("%d", gamePortOf(srv))
 	if srv.OnlineMode {
 		props["online-mode"] = "true"
 	} else {
 		props["online-mode"] = "false"
 	}
 	props["difficulty"] = srv.Difficulty
-	props["motd"] = srv.MOTD
 	props["broadcast-rcon-to-ops"] = "false"
+	props["motd"] = srv.MOTD
 
 	// Write properties back
 	file, err := os.Create(path)

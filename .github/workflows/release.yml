@@ -34,20 +34,16 @@ jobs:
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
-      - name: Build Windows Binary
+      - name: Build Windows Binary & Installer
         run: |
-          wails build -clean -platform windows/amd64
-
-      - name: Create ZIP Archive
-        run: |
-          Compress-Archive -Path build/bin/porque.exe -DestinationPath build/bin/porque-windows-amd64.zip
+          wails build -clean -nsis -platform windows/amd64 -ldflags "-X main.version=${{ github.ref_name }}"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             build/bin/porque.exe
-            build/bin/porque-windows-amd64.zip
+            build/bin/porque-installer.exe
           draft: false
           prerelease: false
         env:

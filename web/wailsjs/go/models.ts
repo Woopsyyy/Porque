@@ -132,12 +132,15 @@ export namespace db {
 	    memory_mb: number;
 	    cpu_cores: number;
 	    volume_name: string;
+	    port: number;
+	    rcon_port: number;
 	    state: string;
 	    difficulty: string;
 	    online_mode: boolean;
 	    motd: string;
 	    backup_enabled: boolean;
-	    backup_interval_minutes: number;
+	    backup_interval_value: number;
+	    backup_interval_unit: string;
 	    backup_keep: number;
 	    // Go type: time
 	    backup_last_run?: any;
@@ -161,12 +164,15 @@ export namespace db {
 	        this.memory_mb = source["memory_mb"];
 	        this.cpu_cores = source["cpu_cores"];
 	        this.volume_name = source["volume_name"];
+	        this.port = source["port"];
+	        this.rcon_port = source["rcon_port"];
 	        this.state = source["state"];
 	        this.difficulty = source["difficulty"];
 	        this.online_mode = source["online_mode"];
 	        this.motd = source["motd"];
 	        this.backup_enabled = source["backup_enabled"];
-	        this.backup_interval_minutes = source["backup_interval_minutes"];
+	        this.backup_interval_value = source["backup_interval_value"];
+	        this.backup_interval_unit = source["backup_interval_unit"];
 	        this.backup_keep = source["backup_keep"];
 	        this.backup_last_run = this.convertValues(source["backup_last_run"], null);
 	        this.created_at = this.convertValues(source["created_at"], null);
@@ -286,6 +292,27 @@ export namespace db {
 		    }
 		    return a;
 		}
+	}
+
+}
+
+export namespace mcserver {
+	
+	export class Player {
+	    name: string;
+	    edition: string;
+	    uuid: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Player(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.edition = source["edition"];
+	        this.uuid = source["uuid"];
+	    }
 	}
 
 }

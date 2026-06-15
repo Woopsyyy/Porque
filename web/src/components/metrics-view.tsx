@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Activity, Cpu, HardDrive, MemoryStick, Users } from "lucide-react";
+import { Activity, Clock, Cpu, HardDrive, MemoryStick, Users } from "lucide-react";
 import { api, type Server } from "@/lib/api";
 import { useWebSocket } from "@/lib/ws";
 import { formatBytes } from "@/lib/format";
@@ -80,9 +80,29 @@ export function MetricsView({ server }: { server: Server }) {
 
   const latest = points[points.length - 1];
 
+  // Per-server runtime (distinct from the application's own uptime), ticking
+  // live from the active instance's start time.
+  const { data: runtime } = useQuery({
+    queryKey: ["runtime", server.id],
+    queryFn: () => api.getServerRuntime(server.id),
+    refetchInterval: 5000,
+  });
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [running]);
+  const uptimeText = useMemo(() => {
+    if (!running || !runtime?.running || !runtime.started_at) return "—";
+    const secs = Math.max(0, Math.floor((now - Date.parse(runtime.started_at)) / 1000));
+    return formatDuration(secs);
+  }, [running, runtime, now]);
+
   return (
     <div className="space-y-5">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        <StatCard icon={Clock} label="Runtime" value={uptimeText} sub="server uptime" />
         <StatCard icon={Cpu} label="CPU" value={latest ? `${latest.cpu}%` : "—"} sub="of allocated cores" />
         <StatCard
           icon={MemoryStick}
@@ -125,6 +145,17 @@ export function MetricsView({ server }: { server: Server }) {
       )}
     </div>
   );
+}
+
+// formatDuration renders seconds as "Xd HH:MM:SS" (days dropped when zero).
+function formatDuration(total: number): string {
+  const d = Math.floor(total / 86400);
+  const h = Math.floor((total % 86400) / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const clock = `${pad(h)}:${pad(m)}:${pad(s)}`;
+  return d > 0 ? `${d}d ${clock}` : clock;
 }
 
 function StatCard({

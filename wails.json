@@ -12,6 +12,7 @@
     "email": ""
   },
   "info": {
-    "outputfilename": "porque"
+    "outputfilename": "porque",
+    "productVersion": "0.1.1"
   }
 }

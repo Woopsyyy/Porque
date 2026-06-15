@@ -3,14 +3,17 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 
-function run(cmd, capture = false) {
+function run(cmd, capture = false, allowFail = false) {
   try {
     if (capture) {
-      return execSync(cmd, { encoding: 'utf8' }).trim();
+      return execSync(cmd, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
     } else {
       return execSync(cmd, { stdio: 'inherit' });
     }
   } catch (err) {
+    if (allowFail) {
+      throw err;
+    }
     process.exit(1);
   }
 }
@@ -18,7 +21,7 @@ function run(cmd, capture = false) {
 // 1. Get latest tag or fallback to version in web/package.json
 let latestTag = '';
 try {
-  latestTag = run('git describe --tags --abbrev=0', true);
+  latestTag = run('git describe --tags --abbrev=0', true, true);
 } catch (e) {
   const webPkg = JSON.parse(fs.readFileSync(path.join(__dirname, '../web/package.json'), 'utf8'));
   latestTag = 'v' + webPkg.version;
